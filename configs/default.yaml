@@ -1,0 +1,94 @@
+# =============================================================================
+# Text-to-SQL Baseline Configuration
+# =============================================================================
+
+# --- Data Pipeline ---
+data:
+  dataset_path: "./data/spider"          # Path to downloaded dataset
+  adapter: "spider_v1"                    # spider_v1 | spider_v2 | multispider
+  processed_dir: "./data/processed"       # Processed data output
+  train_split: "train"
+  dev_split: "dev"
+
+# --- Schema Chunking ---
+chunking:
+  chunk_types:
+    - table
+    - column
+    - foreign_key
+    - value
+  max_sample_values: 5                    # Max sample values per column
+
+# --- Embedding & Indexing ---
+indexing:
+  embedding_model: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+  chroma_persist_dir: "./data/chroma_db"
+  collection_name: "schema_chunks"
+  batch_size: 128
+
+# --- Retrieval ---
+retrieval:
+  bm25_top_k: 30
+  semantic_top_k: 30
+  rrf_k: 60                               # RRF fusion constant
+  final_top_k: 15                          # Final filtered schema elements
+  bidirectional:
+    enable_fk_expansion: true
+    max_expansion_depth: 1                 # How many FK hops
+
+# --- Query Augmentation ---
+augmentation:
+  enable: true
+  strategy: "keyword"                      # keyword | ner | llm
+
+# --- SLM Training (Unsloth) ---
+# Training config lives in training/config.py (dataclasses)
+# Below are the YAML overrides
+training:
+  # LoRA config (applied to both SFT and RL)
+  lora:
+    r: 16                                  # rank: 8 (fast) → 128 (complex)
+    lora_alpha: 32                         # alpha = 2 * r (Unsloth recommendation)
+    lora_dropout: 0                        # 0 for Unsloth optimized perf
+    use_gradient_checkpointing: "unsloth"  # 30% less VRAM
+    use_rslora: false
+
+  # Stage 1: SFT
+  sft:
+    base_model: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    output_dir: "./checkpoints/sft"
+    load_in_4bit: false                    # LoRA mode (not QLoRA)
+    learning_rate: 2.0e-4
+    batch_size: 4
+    gradient_accumulation_steps: 8
+    num_epochs: 3
+    max_seq_length: 2048
+    train_on_completions_only: true        # Unsloth best practice
+
+  # Stage 2: RL Reasoning Boost
+  rl:
+    algorithm: "grpo"                      # grpo | dpo
+    output_dir: "./checkpoints/rl"
+    learning_rate: 5.0e-6
+    num_epochs: 1
+    kl_coeff: 0.05
+    grpo:
+      num_samples: 8
+      temperature: 0.7
+    dpo:
+      beta: 0.1
+    reward:
+      execution_accuracy: 0.5
+      format_check: 0.2
+      schema_faithfulness: 0.15
+      reasoning_quality: 0.15
+
+# --- Evaluation ---
+evaluation:
+  metrics:
+    - execution_accuracy
+    - exact_match
+    - schema_recall
+    - schema_precision
+  db_dir: "./data/spider/database"         # Path to SQLite databases
+  output_dir: "./results"
