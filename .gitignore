@@ -21,9 +21,14 @@ venv/
 data/spider/
 data/chroma_db/
 data/processed/
+data/sft/
+data/sft_test/
+data/npmi_matrix.json
+OmniSQL/
 checkpoints/
 results/
 *.sqlite
+*.gguf
 
 # Notebooks checkpoints
 .ipynb_checkpoints/

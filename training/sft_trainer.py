@@ -120,11 +120,15 @@ class SFTTrainerUnsloth:
         if self.model is None:
             self.setup()
 
-        # Load data
-        data_files = {"train": self.config.train_data_path}
-        if self.config.eval_data_path:
-            data_files["validation"] = self.config.eval_data_path
-        dataset = load_dataset("json", data_files=data_files)
+        # --- Data Loading ---
+        if self.config.data_source == "omnisql":
+            dataset = self._load_omnisql_data()
+        else:
+            # Original custom/spider path
+            data_files = {"train": self.config.train_data_path}
+            if self.config.eval_data_path:
+                data_files["validation"] = self.config.eval_data_path
+            dataset = load_dataset("json", data_files=data_files)
 
         # Format function – 75/25 thinking/direct mix
         thinking_ratio = self.config.thinking_data_ratio
@@ -190,6 +194,55 @@ class SFTTrainerUnsloth:
         logger.info("LoRA adapter saved to %s", output_path)
 
         return trainer
+
+    def _load_omnisql_data(self):
+        """Load pre-prepared OmniSQL data from prepare_sft_data.py output.
+
+        The data is already formatted with <think> tags and think/no-think
+        mix, so we load it directly as {instruction, response} pairs.
+
+        If omnisql_data_paths contains raw OmniSQL JSONs, falls back to
+        on-the-fly conversion via OmniSQLFormatter.
+        """
+        from datasets import load_dataset, Dataset
+
+        paths = self.config.omnisql_data_paths
+
+        # Check if paths point to prepared JSONL files
+        prepared_paths = [p for p in paths if p.endswith(".jsonl")]
+        raw_paths = [p for p in paths if p.endswith(".json")]
+
+        if prepared_paths:
+            # Load pre-prepared JSONL (recommended path)
+            logger.info("Loading pre-prepared JSONL data: %s", prepared_paths)
+            data_files = {"train": prepared_paths[0]}
+            if len(prepared_paths) > 1:
+                data_files["validation"] = prepared_paths[1]
+            dataset = load_dataset("json", data_files=data_files)
+            logger.info("OmniSQL prepared dataset loaded: %d train examples",
+                         len(dataset["train"]))
+            return dataset
+
+        elif raw_paths:
+            # Fallback: on-the-fly conversion from raw OmniSQL JSONs
+            logger.info("Loading raw OmniSQL JSONs (on-the-fly conversion): %s", raw_paths)
+            from .data_formatter import OmniSQLFormatter
+
+            formatter = OmniSQLFormatter()
+            samples = formatter.load_and_merge(
+                data_paths=raw_paths,
+                max_samples_per_file=self.config.omnisql_max_samples,
+            )
+
+            logger.info("Converting %d OmniSQL samples to SFT format...", len(samples))
+            records = [sample.to_sft_thinking_dict() for sample in samples]
+
+            dataset = Dataset.from_list(records)
+            logger.info("OmniSQL dataset ready: %d examples", len(dataset))
+            return {"train": dataset}
+
+        else:
+            raise ValueError(f"No valid data paths found in omnisql_data_paths: {paths}")
 
     def export_gguf(self, quantization: str = "q8_0"):
         """Export model to GGUF format for Ollama/llama.cpp deployment."""

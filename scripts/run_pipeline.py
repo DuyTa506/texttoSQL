@@ -23,6 +23,7 @@ from src.data.schema_indexer import SchemaIndexer
 from src.data.spider_v1_adapter import SpiderV1Adapter
 from src.retrieval.bidirectional_linker import BidirectionalLinker
 from src.retrieval.hybrid_retriever import HybridRetriever
+from src.retrieval.npmi_scorer import NPMIScorer
 from src.retrieval.query_augmentor import QueryAugmentor
 from src.retrieval.schema_filter import SchemaFilter
 
@@ -64,12 +65,22 @@ def main(config_path: str):
     ret_cfg = cfg["retrieval"]
 
     augmentor = QueryAugmentor(strategy=cfg["augmentation"].get("strategy", "keyword"))
+
+    # Optional: Load NPMI scorer
+    npmi_scorer = None
+    npmi_cfg = cfg.get("npmi", {})
+    if npmi_cfg.get("enable") and npmi_cfg.get("matrix_path"):
+        logger.info("Loading NPMI matrix from: %s", npmi_cfg["matrix_path"])
+        npmi_scorer = NPMIScorer.load(npmi_cfg["matrix_path"])
+
     retriever = HybridRetriever(
         indexer=indexer,
         chunks=all_chunks,
         bm25_top_k=ret_cfg["bm25_top_k"],
         semantic_top_k=ret_cfg["semantic_top_k"],
         rrf_k=ret_cfg["rrf_k"],
+        npmi_scorer=npmi_scorer,
+        npmi_top_k=npmi_cfg.get("top_k", 30),
     )
     linker = BidirectionalLinker(
         max_expansion_depth=ret_cfg["bidirectional"]["max_expansion_depth"],

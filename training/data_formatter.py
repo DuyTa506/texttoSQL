@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -250,3 +251,220 @@ class DataFormatter:
         if "HAVING" in sql_upper:
             steps.append("6. Apply post-aggregation filter with HAVING")
         return "\n".join(steps)
+
+
+# =============================================================================
+# OmniSQL Multi-Dataset Formatter
+# =============================================================================
+
+class OmniSQLFormatter:
+    """Convert OmniSQL processed data ({input_seq, output_seq}) to TrainingSample.
+
+    Handles the multi-dataset format from OmniSQL's process_dataset.py:
+      - train_synsql.json  (~2.5M samples)
+      - train_spider.json  (~7K samples)
+      - train_bird.json    (~9.4K samples)
+
+    The output_seq contains CoT reasoning (markdown steps) followed by SQL
+    in a ```sql``` code block.  This formatter splits them apart for
+    Qwen3 think/no-think mode training.
+    """
+
+    # Regex to extract SQL from markdown ```sql ... ``` or ``` ... ``` blocks
+    _SQL_BLOCK_RE = re.compile(
+        r"```(?:sql)?\s*\n(.*?)```",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    def load_and_merge(
+        self,
+        data_paths: list[str | Path],
+        max_samples_per_file: dict[str, int] | None = None,
+    ) -> list[TrainingSample]:
+        """Load multiple OmniSQL processed JSON files and convert to TrainingSamples.
+
+        Parameters
+        ----------
+        data_paths : list[str | Path]
+            Paths to processed JSON files (e.g. train_synsql.json, train_spider.json).
+        max_samples_per_file : dict[str, int], optional
+            Cap per filename, e.g. ``{"train_synsql.json": 200_000}``.
+            Files not listed have no cap.
+
+        Returns
+        -------
+        list[TrainingSample]
+            Merged and converted training samples from all files.
+        """
+        max_samples_per_file = max_samples_per_file or {}
+        all_samples: list[TrainingSample] = []
+
+        for fpath in data_paths:
+            fpath = Path(fpath)
+            fname = fpath.name
+            cap = max_samples_per_file.get(fname)
+
+            logger.info("Loading OmniSQL data from: %s (cap=%s)", fpath, cap)
+
+            samples = self._load_single_file(fpath, max_samples=cap)
+            all_samples.extend(samples)
+            logger.info("  → loaded %d samples (total so far: %d)", len(samples), len(all_samples))
+
+        logger.info("Total OmniSQL samples loaded: %d", len(all_samples))
+        return all_samples
+
+    def _load_single_file(
+        self,
+        path: Path,
+        max_samples: int | None = None,
+    ) -> list[TrainingSample]:
+        """Load a single OmniSQL processed JSON file.
+
+        Uses streaming JSON parsing (ijson) for large files like
+        train_synsql.json (~23GB).
+        """
+        samples: list[TrainingSample] = []
+
+        try:
+            import ijson  # streaming JSON parser for large files
+
+            with open(path, "r", encoding="utf-8") as f:
+                for obj in ijson.items(f, "item"):
+                    input_seq = obj.get("input_seq", "")
+                    output_seq = obj.get("output_seq", "")
+
+                    schema_context, question = self._parse_input_seq(input_seq)
+                    reasoning, sql = self._parse_output_seq(output_seq)
+
+                    samples.append(
+                        TrainingSample(
+                            db_id="omnisql",
+                            question=question,
+                            schema_context=schema_context,
+                            gold_sql=sql,
+                            reasoning=reasoning,
+                            difficulty="unknown",
+                        )
+                    )
+
+                    if max_samples and len(samples) >= max_samples:
+                        break
+
+        except ImportError:
+            # Fallback: standard json (will use lots of RAM for large files)
+            logger.warning("ijson not installed, falling back to json.load() — may be slow for large files")
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if max_samples:
+                data = data[:max_samples]
+
+            for obj in data:
+                input_seq = obj.get("input_seq", "")
+                output_seq = obj.get("output_seq", "")
+
+                schema_context, question = self._parse_input_seq(input_seq)
+                reasoning, sql = self._parse_output_seq(output_seq)
+
+                samples.append(
+                    TrainingSample(
+                        db_id="omnisql",
+                        question=question,
+                        schema_context=schema_context,
+                        gold_sql=sql,
+                        reasoning=reasoning,
+                        difficulty="unknown",
+                    )
+                )
+
+        return samples
+
+    @staticmethod
+    def _parse_input_seq(input_seq: str) -> tuple[str, str]:
+        """Extract (schema_context, question) from OmniSQL input_seq.
+
+        OmniSQL input_seq follows this template::
+
+            Task Overview: ...
+            Database Engine: SQLite
+            Database Schema:
+            {schema DDLs}
+            This schema describes ...
+            Question:
+            {question}
+            Instructions: ...
+
+        Returns
+        -------
+        tuple[str, str]
+            (schema_context, question)
+        """
+        schema_context = ""
+        question = ""
+
+        # Extract schema: between "Database Schema:\n" and "This schema describes"
+        schema_start = input_seq.find("Database Schema:\n")
+        schema_end = input_seq.find("This schema describes")
+
+        if schema_start != -1 and schema_end != -1:
+            schema_context = input_seq[schema_start + len("Database Schema:\n"):schema_end].strip()
+        elif schema_start != -1:
+            # Fallback: take until "Question:"
+            q_marker = input_seq.find("Question:\n", schema_start)
+            if q_marker != -1:
+                schema_context = input_seq[schema_start + len("Database Schema:\n"):q_marker].strip()
+
+        # Extract question: between "Question:\n" and "Instructions:\n"
+        q_start = input_seq.find("Question:\n")
+        q_end = input_seq.find("\nInstructions:")
+
+        if q_start != -1:
+            q_content_start = q_start + len("Question:\n")
+            if q_end != -1 and q_end > q_content_start:
+                question = input_seq[q_content_start:q_end].strip()
+            else:
+                # Fallback: take rest until "Output Format" or end
+                of_marker = input_seq.find("\nOutput Format:", q_content_start)
+                if of_marker != -1:
+                    question = input_seq[q_content_start:of_marker].strip()
+                else:
+                    question = input_seq[q_content_start:].strip()
+
+        return schema_context, question
+
+    @classmethod
+    def _parse_output_seq(cls, output_seq: str) -> tuple[str, str]:
+        """Extract (reasoning, sql) from OmniSQL output_seq.
+
+        The output_seq contains CoT reasoning followed by SQL in a
+        ```sql ... ``` markdown code block.
+
+        Returns
+        -------
+        tuple[str, str]
+            (reasoning, sql) — reasoning is everything before the LAST
+            sql code block; sql is the content of the LAST code block.
+        """
+        # Find all SQL code blocks, take the last one (the final answer)
+        matches = list(cls._SQL_BLOCK_RE.finditer(output_seq))
+
+        if not matches:
+            # No code block found — try to extract SELECT statement
+            select_match = re.search(r"(SELECT\s+.+)", output_seq, re.IGNORECASE | re.DOTALL)
+            if select_match:
+                sql = select_match.group(1).strip()
+                reasoning = output_seq[:select_match.start()].strip()
+                return reasoning, sql
+            # Nothing found — entire output is the response
+            return "", output_seq.strip()
+
+        last_match = matches[-1]
+        sql = last_match.group(1).strip()
+
+        # Reasoning = everything before the last code block
+        reasoning = output_seq[:last_match.start()].strip()
+
+        # Clean up trailing "---" or "### Final" etc. from reasoning
+        reasoning = re.sub(r"\n---\s*$", "", reasoning).strip()
+
+        return reasoning, sql

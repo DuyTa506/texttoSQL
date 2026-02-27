@@ -12,6 +12,7 @@ from rank_bm25 import BM25Okapi
 
 from ..data.schema_chunker import SchemaChunk
 from ..data.schema_indexer import SchemaIndexer
+from .npmi_scorer import NPMIScorer
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ class HybridRetriever:
         bm25_top_k: int = 30,
         semantic_top_k: int = 30,
         rrf_k: int = 60,
+        npmi_scorer: Optional[NPMIScorer] = None,
+        npmi_top_k: int = 30,
     ):
         """
         Parameters
@@ -38,12 +41,18 @@ class HybridRetriever:
             How many results to pull from each retriever before fusion.
         rrf_k : int
             RRF constant (default 60, standard value from the original paper).
+        npmi_scorer : NPMIScorer, optional
+            Pre-built NPMI scorer for statistical schema linking.
+        npmi_top_k : int
+            How many NPMI results before fusion.
         """
         self.indexer = indexer
         self.chunks = chunks
         self.bm25_top_k = bm25_top_k
         self.semantic_top_k = semantic_top_k
         self.rrf_k = rrf_k
+        self.npmi_scorer = npmi_scorer
+        self.npmi_top_k = npmi_top_k
 
         # Build BM25 index
         self._chunk_by_id: dict[str, SchemaChunk] = {}
@@ -72,7 +81,15 @@ class HybridRetriever:
         """
         bm25_results = self._bm25_search(query, db_id=db_id)
         semantic_results = self._semantic_search(query, db_id=db_id)
-        merged = self._rrf_merge(bm25_results, semantic_results)
+
+        result_lists = [bm25_results, semantic_results]
+
+        # Add NPMI signal if available
+        if self.npmi_scorer is not None:
+            npmi_results = self._npmi_search(query, db_id=db_id)
+            result_lists.append(npmi_results)
+
+        merged = self._rrf_merge(*result_lists)
         return merged
 
     # ---- BM25 ---------------------------------------------------------------
@@ -155,3 +172,19 @@ class HybridRetriever:
             merged.append(entry)
 
         return merged
+
+    # ---- NPMI ---------------------------------------------------------------
+
+    def _npmi_search(
+        self, query: str, *, db_id: Optional[str] = None
+    ) -> list[dict]:
+        """Score chunks using NPMI co-occurrence statistics."""
+        # Filter chunks by db_id
+        if db_id:
+            target_chunks = [c for c in self.chunks if c.db_id == db_id]
+        else:
+            target_chunks = self.chunks
+
+        return self.npmi_scorer.score_chunks(
+            query, target_chunks, db_id=db_id, top_k=self.npmi_top_k
+        )

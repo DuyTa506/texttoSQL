@@ -56,9 +56,14 @@ class SFTConfig:
     save_strategy: str = "epoch"
     optim: str = "adamw_8bit"
 
-    # Data
-    train_data_path: str = ""
+    # Data source
+    data_source: str = "custom"            # "omnisql" | "spider" | "custom"
+    train_data_path: str = ""              # for "custom" / "spider" mode
     eval_data_path: str = ""
+
+    # OmniSQL multi-dataset config (used when data_source == "omnisql")
+    omnisql_data_paths: list[str] = field(default_factory=list)
+    omnisql_max_samples: dict = field(default_factory=dict)
 
     # Completions-only training (recommended by Unsloth)
     train_on_completions_only: bool = True

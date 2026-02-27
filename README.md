@@ -7,35 +7,41 @@ This repository contains the baseline implementation for our Text-to-SQL researc
 ```
 text2sql-baseline/
 ├── configs/            # YAML configuration files
-├── data/               # Datasets and SQLite databases
+├── data/               # Datasets, SFT output, NPMI matrices
 ├── notebooks/          # Exploratory Jupyter notebooks
-├── scripts/            # CLI utilities (data prep, training, eval)
-│   ├── run_pipeline.py # End-to-end RAG inference script
-│   ├── curate_dataset_kd.py     # Knowledge Distillation for reasoning traces
-│   └── build_golden_schema.py   # Golden Schema generator with noise injection
-├── src/                # Core implementation components
-│   ├── data/           # Dataset loading and vector DB indexing
-│   ├── retrieval/      # Hybrid BM25 + Semantic, Bidirectional Schema Linker
+├── scripts/            # CLI utilities
+│   ├── run_pipeline.py          # End-to-end RAG inference
+│   ├── prepare_sft_data.py      # Merge OmniSQL datasets → SFT-ready JSONL
+│   ├── build_npmi_matrix.py     # Build NPMI co-occurrence matrix
+│   ├── curate_dataset_kd.py     # Knowledge Distillation reasoning traces
+│   └── build_golden_schema.py   # Golden Schema with noise injection
+├── src/                # Core implementation
+│   ├── data/           # Dataset loading, schema chunking, ChromaDB indexing
+│   ├── retrieval/      # Hybrid BM25 + Semantic + NPMI, Bidirectional Linker
 │   ├── generation/     # RAG Prompter and LLM Generator
 │   └── evaluation/     # Execution accuracy and exact match metrics
-└── training/           # Unsloth Training Module (SFT + RL)
-    ├── config.py       # Centralized hyperparameters
-    ├── sft_trainer.py  # Stage 1: SFT with LoRA (Qwen3 Thinking Mode)
-    ├── rl_trainer.py   # Stage 2: GRPO with vLLM sampling
-    ├── data_formatter.py # Data prep for Qwen3 thinking format
-    └── reward.py       # Multi-signal GRPO reward functions
+├── training/           # Unsloth Training Module (SFT + RL)
+│   ├── config.py       # Centralized hyperparameters
+│   ├── sft_trainer.py  # Stage 1: SFT with LoRA (Qwen3 Thinking Mode)
+│   ├── rl_trainer.py   # Stage 2: GRPO with vLLM sampling
+│   ├── data_formatter.py # OmniSQL formatter + Qwen3 thinking format
+│   └── reward.py       # Multi-signal GRPO reward functions
+└── tests/              # Unit tests (NPMI, OmniSQL formatter)
 ```
 
 ## Core Features
 
-1. **Hybrid Schema Retrieval**: Combines BM25 and SPLADE/SentenceTransformers with Reciprocal Rank Fusion (RRF).
-2. **Qwen3-4B Integration**: Leverages Qwen3's built-in thinking mode (`<think>...</think>`) for step-by-step reasoning.
-3. **Data Prep Pipeline**:
-   - `build_golden_schema.py`: Extracts gold schema elements and injects negative samples (noise) to teach column discrimination.
-   - `curate_dataset_kd.py`: Uses large teacher models (via LiteLLM) to generate high-quality reasoning traces based on the golden schema.
-4. **2-Stage SLM Training (Unsloth)**:
-   - **Stage 1 (SFT)**: Imparts reasoning format and basic structure. Uses 75% thinking data and 25% direct answering data.
-   - **Stage 2 (RL)**: Applies GRPO (with vLLM sampling) utilizing multi-signal rewards (execution, format, schema faithfulness).
+1. **Hybrid Schema Retrieval**: BM25 + Semantic + **NPMI** (co-occurrence statistics) with Reciprocal Rank Fusion (RRF).
+2. **Qwen3 Integration**: Leverages Qwen3's built-in thinking mode (`<think>...</think>`) with **complexity-aware think/direct** assignment.
+3. **OmniSQL Multi-Dataset Training**: Merges Spider (7K) + BIRD (9.4K) + SynSQL (2.5M) into unified SFT data with streaming JSON support.
+4. **Data Prep Pipeline**:
+   - `prepare_sft_data.py`: Merges OmniSQL datasets → training-ready JSONL with `<think>` tags.
+   - `build_npmi_matrix.py`: Builds NPMI co-occurrence matrix from training data.
+   - `build_golden_schema.py`: Extracts gold schema with noise injection.
+   - `curate_dataset_kd.py`: Teacher LLM reasoning traces (Knowledge Distillation).
+5. **2-Stage SLM Training (Unsloth)**:
+   - **Stage 1 (SFT)**: 75% thinking data + 25% direct, complexity-aware assignment (complex JOINs/CTEs always use thinking).
+   - **Stage 2 (RL)**: GRPO with vLLM sampling and multi-signal rewards.
 
 ## Quick Start
 
@@ -51,31 +57,33 @@ pip install --no-deps xformers "trl<0.9.0" peft accelerate bitsandbytes
 
 ### Data Preparation
 
-1. Download the Spider 1.0 dataset and extract it to `data/spider/`.
-2. Generate Golden Schema Contexts (with noise tables):
+1. Download the OmniSQL datasets and extract to `OmniSQL/datasets/data/`.
+2. Prepare merged SFT data (merge Spider + BIRD + SynSQL):
 ```bash
-python scripts/build_golden_schema.py \
-    --dataset_path data/spider/train_spider.json \
-    --tables_path data/spider/tables.json \
-    --output_path data/schema_contexts_golden.json
+python scripts/prepare_sft_data.py \
+    --data_dir OmniSQL/datasets/data \
+    --output_dir data/sft \
+    --max_synsql 200000
 ```
-3. (Optional) Extract reasoning traces using a Teacher LLM (Knowledge Distillation):
+3. (Optional) Build NPMI matrix for retrieval:
 ```bash
-OPENAI_API_KEY="..." python scripts/curate_dataset_kd.py \
-    --dataset_path data/spider/train_spider.json \
-    --tables_path data/spider/tables.json \
-    --schema_contexts_path data/schema_contexts_golden.json \
-    --output_path data/reasoning_cache.json \
-    --model gpt-4o-mini
+python scripts/build_npmi_matrix.py \
+    --data_paths OmniSQL/datasets/data/train_spider.json \
+    --data_format omnisql \
+    --output_path data/npmi_matrix.json
 ```
+4. Enable NPMI in `configs/default.yaml`: set `npmi.enable: true`
 
 ### Training
 
-Run the specialized modules within the `training/` directory to fine-tune the Qwen3-4B models.
+Run the SFT trainer:
+```bash
+# Using pre-prepared JSONL (recommended)
+python -m training.sft_trainer --data_source omnisql \
+    --omnisql_data_paths data/sft/train.jsonl data/sft/dev.jsonl
+```
 
 ### End-to-End Pipeline
-
-To execute the full text-to-SQL evaluation pipeline on a specific dataset:
 
 ```bash
 python scripts/run_pipeline.py --dataset spider --mode run
@@ -83,16 +91,21 @@ python scripts/run_pipeline.py --dataset spider --mode run
 
 ## Supported Datasets
 
-| Dataset | Adapter | Status |
+| Dataset | Source | Usage |
 |---|---|---|
-| Spider 1.0 | `spider_v1_adapter.py` | Ready (Baseline) |
-| Spider 2.0 | `spider_v2_adapter.py` | Planned |
-| BIRD | `bird_adapter.py` | Planned |
+| Spider 1.0 | OmniSQL | Train (7K) + Dev (1K) |
+| BIRD | OmniSQL | Train (9.4K) + Dev (1.5K) |
+| SynSQL-2.5M | OmniSQL | Train (subsample) |
+| EHRSQL | OmniSQL | Dev (1K) |
+| ScienceBenchmark | OmniSQL | Dev (299) |
+| Spider-DK/Syn/Realistic | OmniSQL | Dev (2K+) |
 
 ## Tech Stack
 
 - **Training**: Unsloth + LoRA + TRL
-- **Embeddings**: `paraphrase-multilingual-mpnet-base-v2` + `SPLADE`
-- **Vector DB**: ChromaDB + Qdrant
+- **Embeddings**: `paraphrase-multilingual-mpnet-base-v2`
+- **Vector DB**: ChromaDB
+- **Retrieval**: BM25 + Semantic + NPMI (RRF fusion)
 - **SLM**: Qwen3-4B
 - **RL**: GRPO (primary) / DPO (ablation)
+- **Data**: `ijson` for streaming large JSON files

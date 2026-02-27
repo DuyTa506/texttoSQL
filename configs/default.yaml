@@ -41,6 +41,13 @@ augmentation:
   enable: true
   strategy: "keyword"                      # keyword | ner | llm
 
+# --- NPMI Schema Linking ---
+npmi:
+  enable: false                            # Set true after building matrix
+  matrix_path: "./data/npmi_matrix.json"   # Pre-built NPMI co-occurrence matrix
+  min_count: 3                             # Min co-occurrence for valid NPMI
+  top_k: 30                                # NPMI candidates before RRF fusion
+
 # --- SLM Training (Unsloth) ---
 # Training config lives in training/config.py (dataclasses)
 # Below are the YAML overrides
@@ -64,6 +71,15 @@ training:
     num_epochs: 3
     max_seq_length: 2048
     train_on_completions_only: true        # Unsloth best practice
+    # Data source: "omnisql" | "spider" | "custom"
+    data_source: "custom"
+    # OmniSQL multi-dataset paths (used when data_source == "omnisql")
+    omnisql_data_paths:
+      - "./data/train_synsql.json"
+      - "./data/train_spider.json"
+      - "./data/train_bird.json"
+    omnisql_max_samples:
+      train_synsql.json: 200000            # Subsample SynSQL-2.5M
 
   # Stage 2: RL Reasoning Boost
   rl:
