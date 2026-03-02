@@ -10,6 +10,7 @@ text2sql-baseline/
 ├── data/               # Datasets, SFT output, NPMI matrices
 ├── notebooks/          # Exploratory Jupyter notebooks
 ├── scripts/            # CLI utilities
+│   ├── train_sft.py             # Launch SFT training (DDP-compatible)
 │   ├── run_pipeline.py          # End-to-end RAG inference
 │   ├── prepare_sft_data.py      # Merge OmniSQL datasets → SFT-ready JSONL
 │   ├── build_npmi_matrix.py     # Build NPMI co-occurrence matrix
@@ -50,37 +51,84 @@ text2sql-baseline/
 Navigate to the project directory and install the required dependencies:
 
 ```bash
-pip install -e .[dev]
-pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-pip install --no-deps xformers "trl<0.9.0" peft accelerate bitsandbytes
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,train]"
+pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+pip install torchvision ijson
+```
+
+> **⚠️ Version Mismatch Warning (unsloth ↔ unsloth_zoo)**
+>
+> Installing `unsloth` from GitHub (latest) while `unsloth_zoo` comes from PyPI can cause:
+> ```
+> KeyError: 'sanitize_logprob'
+> ```
+> **Fix:** Add the missing function to `unsloth_zoo/rl_replacements.py`:
+> ```python
+> # At the end of rl_replacements.py, before `sft_prepare_dataset`:
+> def sanitize_logprob(logprob):
+>     if logprob is None: return logprob
+>     return torch.nan_to_num(logprob, nan=0.0, posinf=0.0, neginf=0.0)
+> RL_REPLACEMENTS["sanitize_logprob"] = sanitize_logprob
+> ```
+> Or reinstall both packages from the same source once official multi-GPU support is released.
+
+### Download Base Model
+
+```bash
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('Qwen/Qwen3-4B', local_dir='./models/Qwen3-4B')
+"
 ```
 
 ### Data Preparation
 
-1. Download the OmniSQL datasets and extract to `OmniSQL/datasets/data/`.
+1. Download the OmniSQL datasets and extract to `datasets/data/`.
 2. Prepare merged SFT data (merge Spider + BIRD + SynSQL):
 ```bash
 python scripts/prepare_sft_data.py \
-    --data_dir OmniSQL/datasets/data \
+    --data_dir datasets/data \
     --output_dir data/sft \
-    --max_synsql 200000
+    --max_synsql 100000 \
+    --thinking_ratio 0.75
 ```
 3. (Optional) Build NPMI matrix for retrieval:
 ```bash
 python scripts/build_npmi_matrix.py \
-    --data_paths OmniSQL/datasets/data/train_spider.json \
+    --data_paths datasets/data/train_spider.json \
     --data_format omnisql \
     --output_path data/npmi_matrix.json
 ```
 4. Enable NPMI in `configs/default.yaml`: set `npmi.enable: true`
 
-### Training
+### Training (DDP Multi-GPU)
 
-Run the SFT trainer:
+Stage 1 — SFT with QLoRA on all available GPUs:
 ```bash
-# Using pre-prepared JSONL (recommended)
-python -m training.sft_trainer --data_source omnisql \
-    --omnisql_data_paths data/sft/train.jsonl data/sft/dev.jsonl
+# 4-GPU DDP training (adjust --nproc_per_node to your GPU count)
+torchrun --nproc_per_node=4 scripts/train_sft.py \
+    --base_model ./models/Qwen3-4B \
+    --data_source omnisql \
+    --omnisql_data_paths data/sft/train.jsonl data/sft/dev.jsonl \
+    --batch_size 2 \
+    --gradient_accumulation_steps 4 \
+    --num_epochs 3 \
+    --load_in_4bit \
+    --output_dir ./checkpoints/sft
+```
+
+> **Note:** With DDP, effective batch size = `batch_size × grad_accum × num_GPUs`.
+> Example: 2 × 4 × 4 = **32**.
+>
+> Use `--load_in_4bit` (QLoRA) for GPUs with ≤16GB VRAM.
+> Without it, each GPU needs ~8GB just for the FP16 model weights.
+
+Stage 2 — GRPO reinforcement learning (after SFT):
+```bash
+torchrun --nproc_per_node=4 scripts/train_rl.py \
+    --sft_model_path ./checkpoints/sft/final \
+    --train_data_path data/sft/train.jsonl
 ```
 
 ### End-to-End Pipeline
@@ -102,10 +150,18 @@ python scripts/run_pipeline.py --dataset spider --mode run
 
 ## Tech Stack
 
-- **Training**: Unsloth + LoRA + TRL
+- **Training**: Unsloth + QLoRA + TRL (DDP multi-GPU via `torchrun`)
 - **Embeddings**: `paraphrase-multilingual-mpnet-base-v2`
 - **Vector DB**: ChromaDB
 - **Retrieval**: BM25 + Semantic + NPMI (RRF fusion)
 - **SLM**: Qwen3-4B
 - **RL**: GRPO (primary) / DPO (ablation)
 - **Data**: `ijson` for streaming large JSON files
+
+## Hardware Requirements
+
+| Setup | VRAM per GPU | Mode | Notes |
+|---|---|---|---|
+| 1× GPU ≥16GB | 16GB+ | QLoRA (`--load_in_4bit`) | Single GPU, no `torchrun` needed |
+| 4× GPU ≥16GB | 16GB each | DDP + QLoRA | Recommended: `torchrun --nproc_per_node=4` |
+| 1× GPU ≥24GB | 24GB+ | Full LoRA (FP16) | No `--load_in_4bit` flag |

@@ -46,6 +46,7 @@ class SFTTrainerUnsloth:
         logger.info("Thinking mode: %s", self.config.enable_thinking)
 
         # Step 1: Load base model
+        # NOTE: No device_map — DDP handles multi-GPU via torchrun
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.config.base_model,
             max_seq_length=self.config.max_seq_length,
@@ -164,7 +165,7 @@ class SFTTrainerUnsloth:
             weight_decay=self.config.weight_decay,
             logging_steps=self.config.logging_steps,
             save_strategy=self.config.save_strategy,
-            evaluation_strategy="epoch" if self.config.eval_data_path else "no",
+            eval_strategy="epoch" if (self.config.eval_data_path or "validation" in dataset) else "no",
             fp16=not is_bfloat16_supported(),
             bf16=is_bfloat16_supported(),
             optim=self.config.optim,

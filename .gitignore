@@ -26,10 +26,15 @@ data/sft/
 data/sft_test/
 data/npmi_matrix.json
 OmniSQL/
+models/
 checkpoints/
 results/
 *.sqlite
 *.gguf
+
+# Training logs
+*.log
+DDP.txt
 
 # Notebooks checkpoints
 .ipynb_checkpoints/
