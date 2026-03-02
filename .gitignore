@@ -18,6 +18,7 @@ venv/
 *.swp
 
 # Data & Models (large files)
+datasets/data/
 data/spider/
 data/chroma_db/
 data/processed/
