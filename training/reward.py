@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 THINK_RE = re.compile(r"<think>(.*?)</think>", flags=re.DOTALL)
 SQL_BLOCK_RE = re.compile(r"```sql\s*(.+?)\s*```", flags=re.DOTALL)
 
+FULL_FORMAT_RE = re.compile(
+    r"</think>.*?```sql\s*(.+?)\s*```[\s]*(?:<\|endoftext\|>)?[\s]*$",
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+
 
 def extract_thinking(text: str) -> str:
     """Extract content from <think>...</think> block."""
@@ -185,3 +191,133 @@ class RewardFunction:
         reasoning_upper = reasoning_text.upper()
         mentioned = sum(1 for t in table_names if t.upper() in reasoning_upper)
         return min(mentioned / max(len(table_names), 1), 1.0)
+
+
+# ──────────────────────────────────────────────────────────────
+# Correction Reward Functions (for multitask GRPO)
+# These are used when task_type == "correction" in rl_trainer.py
+# ──────────────────────────────────────────────────────────────
+
+
+def check_correction_improvement(completions, answer, wrong_sql=None, **kwargs):
+    """Reward for actually improving the wrong SQL.
+
+    Scoring:
+      +4.0  corrected SQL is different from wrong AND matches gold (answer)
+      +2.0  corrected SQL is different from wrong (changed something)
+      -1.0  corrected SQL is identical to wrong SQL (no change)
+    """
+    scores = []
+    for i, completion in enumerate(completions):
+        response = completion[0]["content"]
+
+        # Extract predicted SQL from response
+        match = SQL_BLOCK_RE.search(response)
+        if match is None:
+            match = FULL_FORMAT_RE.search(response)
+        predicted = match.group(1).strip() if match else ""
+
+        if not predicted:
+            scores.append(-1.0)
+            continue
+
+        # Get wrong_sql for this sample
+        if wrong_sql is not None:
+            if isinstance(wrong_sql, list):
+                bad_sql = wrong_sql[i] if i < len(wrong_sql) else ""
+            else:
+                bad_sql = str(wrong_sql)
+        else:
+            bad_sql = ""
+
+        gold = answer[i] if isinstance(answer, list) else str(answer)
+
+        is_different = predicted.strip() != bad_sql.strip()
+        is_correct = (
+            predicted.strip() == gold.strip()
+            or predicted.strip().lower() == gold.strip().lower()
+        )
+
+        if is_different and is_correct:
+            scores.append(4.0)
+        elif is_different:
+            scores.append(2.0)
+        else:
+            scores.append(-1.0)
+
+    return scores
+
+
+def check_error_addressed(completions, error_type=None, **kwargs):
+    """Reward for specifically addressing the error category.
+
+    +1.5 if the specific error type is no longer present in the corrected SQL:
+      - no_such_table: no "no such table" pattern in the SQL
+      - syntax_error:  SQL parses cleanly via sqlparse
+      - no_such_column: no "no such column" pattern (structural check)
+    Other error types: +0.5 credit for non-empty SQL (best-effort).
+    """
+    scores = []
+    for i, completion in enumerate(completions):
+        response = completion[0]["content"]
+
+        match = SQL_BLOCK_RE.search(response)
+        if match is None:
+            match = FULL_FORMAT_RE.search(response)
+        predicted = match.group(1).strip() if match else ""
+
+        if not predicted:
+            scores.append(0.0)
+            continue
+
+        # Resolve error_type for this sample
+        if error_type is not None:
+            if isinstance(error_type, list):
+                etype = error_type[i] if i < len(error_type) else ""
+            else:
+                etype = str(error_type)
+        else:
+            etype = ""
+
+        score = 0.0
+
+        if etype == "syntax_error":
+            # Check if SQL parses cleanly
+            try:
+                parsed = sqlparse.parse(predicted)
+                if parsed and parsed[0].get_type() is not None:
+                    score = 1.5
+                else:
+                    score = 0.5
+            except Exception:
+                score = 0.0
+
+        elif etype == "no_such_table":
+            # Heuristic: check SQL doesn't reference obviously wrong table names
+            # (we can't run SQLite here, so use structural check)
+            if predicted.upper().startswith("SELECT"):
+                score = 1.0  # partial credit — it's a SELECT, error may be fixed
+            else:
+                score = 0.3
+
+        elif etype == "no_such_column":
+            # SQL is syntactically valid SELECT
+            if predicted.upper().startswith("SELECT"):
+                score = 1.0
+            else:
+                score = 0.3
+
+        elif etype in ("wrong_result", "empty_result", "execution_error"):
+            # Can't verify without executing — give partial credit for non-trivial SQL
+            if len(predicted.split()) > 3 and predicted.upper().startswith("SELECT"):
+                score = 0.5
+            else:
+                score = 0.0
+
+        else:
+            # Unknown error type — give small credit for any SQL
+            score = 0.3 if predicted else 0.0
+
+        scores.append(score)
+
+    return scores

@@ -1,0 +1,31 @@
+# Training dependencies (Stage 1 SFT + Stage 2 GRPO/DPO)
+# Generated from pyproject.toml [project.optional-dependencies.train]
+#
+# Install with uv (recommended):
+#   uv sync --extra train
+#
+# Install with pip (fallback):
+#   pip install -r requirements.txt -r requirements-train.txt
+#
+# ⚠️  Unsloth must be installed separately AFTER this file — it requires
+#     a CUDA-specific wheel that is not on PyPI:
+#       pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+#       pip install torchvision ijson
+#
+# ⚠️  Unsloth version warning: if you see KeyError: 'sanitize_logprob',
+#     add to unsloth_zoo/rl_replacements.py:
+#       import torch
+#       def sanitize_logprob(logprob):
+#           if logprob is None: return logprob
+#           return torch.nan_to_num(logprob, nan=0.0, posinf=0.0, neginf=0.0)
+#       RL_REPLACEMENTS["sanitize_logprob"] = sanitize_logprob
+
+-r requirements.txt
+
+torch>=2.1.0
+transformers>=4.40.0
+peft>=0.10.0
+trl>=0.8.0
+datasets>=2.18.0
+accelerate>=0.28.0
+torchvision>=0.16.0

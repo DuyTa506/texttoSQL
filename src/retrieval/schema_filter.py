@@ -22,6 +22,7 @@ class SchemaFilter:
         db: Database,
         *,
         top_k: Optional[int] = None,
+        value_hints: Optional[str] = None,
     ) -> str:
         """Select top-K chunks and produce a structured schema string.
 
@@ -33,6 +34,9 @@ class SchemaFilter:
             Full database schema (for supplementary info).
         top_k : int, optional
             Override instance-level top_k.
+        value_hints : str, optional
+            SQL comment hints from ValueScanner (appended after FK summary).
+            Example: "-- students.name likely contains: 'Alice'"
 
         Returns
         -------
@@ -96,6 +100,12 @@ class SchemaFilter:
             if fk_lines:
                 lines.append("Foreign Keys:")
                 lines.extend(fk_lines)
+
+        # Inject value hints from ValueScanner (if provided)
+        if value_hints and value_hints.strip():
+            lines.append("")
+            lines.append("-- Value hints (likely cell values for this question):")
+            lines.append(value_hints.strip())
 
         return "\n".join(lines)
 

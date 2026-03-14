@@ -173,6 +173,55 @@ class HybridRetriever:
 
         return merged
 
+    def retrieve_multi(
+        self,
+        queries: list[str],
+        *,
+        db_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Run hybrid retrieval for multiple queries and merge results via RRF.
+
+        Used by the decompose strategy when a question is split into sub-queries.
+        Each sub-query is retrieved independently, then all result lists are merged
+        via a final RRF pass, and duplicates are removed by content.
+
+        Parameters
+        ----------
+        queries : list[str]
+            Sub-queries produced by QuestionDecomposer / QueryAugmentor.
+        db_id : str, optional
+            Filter results to this database.
+    
+        Returns
+        -------
+        list[dict]
+            Merged, deduplicated, RRF-ranked results.
+        """
+        if not queries:
+            return []
+
+        if len(queries) == 1:
+            return self.retrieve(queries[0], db_id=db_id)
+
+        # Retrieve for each sub-query
+        per_query_results: list[list[dict]] = [
+            self.retrieve(q, db_id=db_id) for q in queries
+        ]
+
+        # Merge all result lists via one final RRF pass
+        merged = self._rrf_merge(*per_query_results, k=self.rrf_k)
+
+        # Deduplicate by content (keep highest-scored occurrence)
+        seen_content: set[str] = set()
+        deduped: list[dict] = []
+        for item in merged:
+            content = item.get("content", "")
+            if content not in seen_content:
+                seen_content.add(content)
+                deduped.append(item)
+
+        return deduped
+
     # ---- NPMI ---------------------------------------------------------------
 
     def _npmi_search(

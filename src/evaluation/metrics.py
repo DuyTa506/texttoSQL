@@ -111,12 +111,30 @@ def compute_metrics(
 
     Each dict in *results* should have:
       ``ex`` (bool), ``em`` (bool), ``recall`` (float), ``precision`` (float).
+
+    Optional fields (added by Phase 4):
+      ``retry_count`` (int)       — number of retries for this example
+      ``correction_applied`` (bool) — whether a correction changed the SQL
     """
     n = len(results) or 1
-    return {
+    metrics = {
         "execution_accuracy": sum(r.get("ex", False) for r in results) / n,
         "exact_match": sum(r.get("em", False) for r in results) / n,
         "schema_recall": sum(r.get("recall", 0.0) for r in results) / n,
         "schema_precision": sum(r.get("precision", 0.0) for r in results) / n,
         "total_examples": len(results),
     }
+
+    # Optional Phase 4 retry metrics (only included if any result has retry_count)
+    if any("retry_count" in r for r in results):
+        metrics["avg_retry_count"] = (
+            sum(r.get("retry_count", 0) for r in results) / n
+        )
+        metrics["examples_retried"] = sum(
+            1 for r in results if r.get("retry_count", 0) > 0
+        )
+        metrics["corrections_applied"] = sum(
+            1 for r in results if r.get("correction_applied", False)
+        )
+
+    return metrics

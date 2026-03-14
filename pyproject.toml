@@ -1,13 +1,17 @@
 [project]
 name = "text2sql-baseline"
 version = "0.1.0"
-description = "Text-to-SQL Baseline: RAG Schema Linking + SLM Fine-tuning (SFT → GRPO/DPO)"
+description = "Text-to-SQL Research Baseline: Schema Knowledge Graph + 4-Phase RAG + SLM Fine-tuning (SFT → GRPO/DPO)"
 requires-python = ">=3.10"
 dependencies = [
     # Embeddings & Retrieval
     "sentence-transformers>=2.6.0",
     "chromadb>=0.5.0",
     "rank-bm25>=0.2.2",
+    # Schema Knowledge Graph
+    "networkx>=3.3",
+    # LLM provider (OpenAI + compatible endpoints)
+    "openai>=1.30.0",
     # Utilities
     "pyyaml>=6.0",
     "sqlparse>=0.5.0",
@@ -15,18 +19,28 @@ dependencies = [
     "tqdm>=4.66.0",
     "rich>=13.0",
     "ijson>=3.2.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
 train = [
-    # Unsloth (install separately: pip install unsloth)
-    # "unsloth",  # install via: pip install unsloth
+    # Unsloth must be installed separately:
+    #   pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
     "torch>=2.1.0",
     "transformers>=4.40.0",
     "peft>=0.10.0",
     "trl>=0.8.0",
     "datasets>=2.18.0",
     "accelerate>=0.28.0",
+    "torchvision>=0.16.0",
+]
+# Local HuggingFace model inference (HuggingFaceLLM)
+# torch + transformers are pulled in by [train]; install this separately if
+# you only want inference without the full training stack.
+hf = [
+    "torch>=2.1.0",
+    "transformers>=4.40.0",
+    "bitsandbytes>=0.43.0",   # optional: 4-bit quantization (load_in_4bit)
 ]
 dev = [
     "pytest>=8.0",
@@ -34,15 +48,51 @@ dev = [
     "ruff>=0.3.0",
     "ipykernel>=6.0",
 ]
+correction = [
+    # Teacher LLM calls for mine_correction_data.py and node enrichment
+    # openai is already a core dep; anthropic is optional
+    "anthropic>=0.28.0",
+]
 
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*", "training*"]
+[tool.hatch.build.targets.wheel]
+packages = ["src", "training", "llms", "embeddings"]
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+
+[tool.uv]
+# Packages that must be installed from source / custom wheels (not PyPI).
+# Unsloth is not on PyPI in a form compatible with all CUDA versions —
+# install it manually AFTER running `uv sync` (see README).
+managed = true
+
+[tool.uv.sources]
+# Override source for unsloth if you want uv to manage it directly:
+# unsloth = { git = "https://github.com/unslothai/unsloth.git" }
+
+# ---------------------------------------------------------------------------
+# Ruff linter
+# ---------------------------------------------------------------------------
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]   # line length handled by formatter
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

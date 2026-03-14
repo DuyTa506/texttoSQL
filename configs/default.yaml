@@ -39,7 +39,7 @@ retrieval:
 # --- Query Augmentation ---
 augmentation:
   enable: true
-  strategy: "keyword"                      # keyword | ner | llm
+  strategy: "keyword"                      # keyword | value | decompose
 
 # --- NPMI Schema Linking ---
 npmi:
@@ -47,6 +47,80 @@ npmi:
   matrix_path: "./data/npmi_matrix.json"   # Pre-built NPMI co-occurrence matrix
   min_count: 3                             # Min co-occurrence for valid NPMI
   top_k: 30                                # NPMI candidates before RRF fusion
+
+# =============================================================================
+# Schema Knowledge Graph  (disabled by default — build graph offline first)
+# =============================================================================
+schema_graph:
+  enabled: false                           # Set true to use GraphRetriever
+  graph_path: "./data/schema_graphs/spider_enriched.json"
+  # Node embeddings: stored in ChromaDB (recommended) or in-node JSON fallback
+  node_collection: "schema_graph_nodes"   # ChromaDB collection name for node embeddings
+  # (chroma_persist_dir is shared from indexing.chroma_persist_dir)
+  # PPR retrieval parameters
+  top_m: 5                                 # PPR seed nodes (top cosine matches)
+  alpha: 0.7                              # PPR damping factor (higher = closer to seeds)
+  score_threshold: 0.05                   # Min PPR score to include a node
+  max_nodes: 20                           # Hard cap on returned nodes per query
+  synonym_boost: 0.3                      # Extra score for synonym token match
+  # Hybrid mode: merge GraphRetriever + HybridRetriever results via RRF
+  hybrid: false                            # Set true to fuse both retrievers
+
+# =============================================================================
+# Phase 1: Pre-Retrieval  (all disabled by default — enable for ablation)
+# =============================================================================
+pre_retrieval:
+  # Value Scanner: scan DB cell values to match NL mentions
+  value_scan:
+    enabled: false                         # Set true to activate
+    max_values: 500                        # Max DISTINCT values per column to scan
+    top_k: 5                              # Max ValueMatch results per question
+    min_score: 0.75                        # Fuzzy match threshold [0, 1]
+
+  # Question Decomposer: split complex questions into sub-questions
+  decomposition:
+    enabled: false                         # Set true to activate
+    complexity_threshold: 0.6             # Min complexity score before splitting
+    min_token_count: 12                   # Min tokens before attempting decomposition
+
+# =============================================================================
+# Phase 3: Generation
+# =============================================================================
+generation:
+  # ── Provider ────────────────────────────────────────────────────────────────
+  # "local"  → loads a HuggingFace / Unsloth checkpoint from model_path
+  #            requires GPU; set model_path to your SFT/RL checkpoint
+  # "openai" → calls OpenAI Chat Completions API (no GPU needed)
+  #            set model_path to the model name, e.g. "gpt-4o-mini"
+  #            set api_key or export OPENAI_API_KEY=<your-key>
+  provider: local                         # local | openai
+  model_path: ""                          # checkpoint path (local) or model name (openai)
+
+  # ── OpenAI-specific ─────────────────────────────────────────────────────────
+  api_key: ""                             # leave empty to read from OPENAI_API_KEY env var
+  api_base_url: ""                        # custom base URL for OpenAI-compatible endpoints
+                                          # e.g. Azure, Together.ai, Groq, local vLLM
+
+  # ── Generation parameters ───────────────────────────────────────────────────
+  mode: standard                          # standard | cot_plan | divide_conquer
+  n_candidates: 1                         # >1 triggers multi-candidate + selector
+  temperature: 0.0                        # 0.0 = greedy (deterministic)
+  candidate_temperature: 0.8             # temperature for candidate diversity
+  max_new_tokens: 512
+
+# =============================================================================
+# Phase 4: Post-Generation  (all disabled by default — enable for ablation)
+# =============================================================================
+post_generation:
+  # Retry execution loop: run SQL → classify error → re-prompt → repeat
+  retry_loop:
+    enabled: false                         # Set true to activate
+    max_retries: 3
+
+  # Multi-candidate selection (used when generation.n_candidates > 1)
+  candidates:
+    n: 1                                   # Mirror of generation.n_candidates
+    strategy: execution_consistency        # execution_consistency
 
 # --- SLM Training (Unsloth) ---
 # Training config lives in training/config.py (dataclasses)
@@ -98,6 +172,9 @@ training:
       format_check: 0.2
       schema_faithfulness: 0.15
       reasoning_quality: 0.15
+    # Correction multitask (Stage 2 extension)
+    correction_data_path: ""               # Path to mined correction JSONL
+    correction_mix_ratio: 0.2             # Fraction of correction samples per batch
 
 # --- Evaluation ---
 evaluation:

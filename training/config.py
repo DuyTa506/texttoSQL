@@ -118,6 +118,14 @@ class RLConfig:
         "schema_faithfulness": 2.0,        # uses correct tables/columns
     })
 
+    # Steps / epochs control
+    # max_steps takes precedence over num_epochs when > 0
+    max_steps: int = -1                    # -1 = derive from num_epochs × dataset
+
     # Data
     train_data_path: str = ""
     db_dir: str = ""
+
+    # Correction multitask (Stage 2 extension)
+    correction_data_path: str = ""          # path to mined correction JSONL
+    correction_mix_ratio: float = 0.2       # fraction of correction samples per batch

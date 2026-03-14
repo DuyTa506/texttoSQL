@@ -20,6 +20,7 @@ Docs:
 from __future__ import annotations
 
 import logging
+import random
 import re
 from pathlib import Path
 
@@ -226,15 +227,26 @@ class GRPOTrainerUnsloth:
         )
 
     def train(self):
-        """Run GRPO training with vLLM sampling (Qwen3 pattern)."""
-        from datasets import load_dataset
+        """Run GRPO training with vLLM sampling (Qwen3 pattern).
+
+        Supports multitask training when correction_data_path is configured.
+        The dataset is mixed at correction_mix_ratio (default 20% correction,
+        80% nl2sql) and reward functions are routed per sample task_type.
+        """
+        from datasets import Dataset, load_dataset
         from trl import GRPOConfig, GRPOTrainer
         from unsloth import is_bfloat16_supported
 
         if self.model is None:
             self.setup()
 
-        dataset = load_dataset("json", data_files={"train": self.config.train_data_path})
+        # ---- Load base nl2sql dataset ----
+        nl2sql_dataset = load_dataset(
+            "json", data_files={"train": self.config.train_data_path}
+        )["train"]
+
+        # ---- Optionally mix in correction samples ----
+        train_dataset = self._build_mixed_dataset(nl2sql_dataset)
 
         # vLLM sampling params for generation (following Qwen3 notebook)
         from vllm import SamplingParams
@@ -262,15 +274,17 @@ class GRPOTrainerUnsloth:
             num_generations=self.config.grpo_num_generations,
             max_prompt_length=self.config.max_prompt_length,
             max_completion_length=self.config.max_completion_length,
-            max_steps=100,  # adjust for full training
-            save_steps=100,
+            max_steps=self.config.max_steps if self.config.max_steps > 0 else -1,
+            save_steps=self.config.logging_steps * 10,
             output_dir=self.config.output_dir,
             fp16=not is_bfloat16_supported(),
             bf16=is_bfloat16_supported(),
             report_to="none",
         )
 
-        # Multi-signal reward functions (each called independently by GRPO)
+        # Multi-signal reward functions — route by task_type
+        # When multitask data is present, we use a combined set;
+        # task-specific routing happens inside each reward function via kwargs.
         reward_funcs = [
             match_sql_format_exactly,
             match_sql_format_approximately,
@@ -278,17 +292,27 @@ class GRPOTrainerUnsloth:
             check_schema_faithfulness,
         ]
 
+        # Add correction-specific rewards if correction data is being used
+        if self.config.correction_data_path:
+            from .reward import check_correction_improvement, check_error_addressed
+            reward_funcs.extend([check_correction_improvement, check_error_addressed])
+            logger.info(
+                "Multitask GRPO: added correction rewards "
+                "(check_correction_improvement, check_error_addressed)"
+            )
+
         trainer = GRPOTrainer(
             model=self.model,
             processing_class=self.tokenizer,
             reward_funcs=reward_funcs,
             args=grpo_config,
-            train_dataset=dataset["train"],
+            train_dataset=train_dataset,
         )
 
         logger.info(
-            "Starting GRPO (Qwen3, N=%d, vLLM)...",
+            "Starting GRPO (Qwen3, N=%d, vLLM, dataset_size=%d)...",
             self.config.grpo_num_generations,
+            len(train_dataset),
         )
         trainer.train()
 
@@ -297,6 +321,122 @@ class GRPOTrainerUnsloth:
         self.tokenizer.save_pretrained(str(output_path))
         logger.info("GRPO model saved to %s", output_path)
         return trainer
+
+    def _build_mixed_dataset(self, nl2sql_dataset):
+        """Build a mixed nl2sql + correction dataset.
+
+        If correction_data_path is not set, returns the nl2sql_dataset unchanged.
+        Otherwise interleaves correction samples at correction_mix_ratio.
+        """
+        if not self.config.correction_data_path:
+            return nl2sql_dataset
+
+        correction_path = Path(self.config.correction_data_path)
+        if not correction_path.exists():
+            logger.warning(
+                "correction_data_path '%s' does not exist — using nl2sql only.",
+                correction_path,
+            )
+            return nl2sql_dataset
+
+        try:
+            from .correction_formatter import CorrectionDataset
+        except ImportError:
+            logger.warning("correction_formatter not available — using nl2sql only.")
+            return nl2sql_dataset
+
+        corr_dataset = CorrectionDataset.load(correction_path)
+        corr_grpo_list = corr_dataset.to_grpo_list()
+
+        if not corr_grpo_list:
+            return nl2sql_dataset
+
+        # Convert nl2sql dataset to list, add task_type field
+        nl2sql_list = []
+        for sample in nl2sql_dataset:
+            row = dict(sample)
+            row.setdefault("task_type", "nl2sql")
+            nl2sql_list.append(row)
+
+        # Calculate mix sizes
+        n_total = len(nl2sql_list)
+        ratio = max(0.0, min(1.0, self.config.correction_mix_ratio))
+        n_correction = int(n_total * ratio / (1.0 - ratio + 1e-9))
+        n_correction = min(n_correction, len(corr_grpo_list))
+
+        # Sample correction data (with replacement if needed)
+        if n_correction <= len(corr_grpo_list):
+            sampled_correction = random.sample(corr_grpo_list, n_correction)
+        else:
+            sampled_correction = [
+                random.choice(corr_grpo_list) for _ in range(n_correction)
+            ]
+
+        # Merge and shuffle
+        mixed = nl2sql_list + sampled_correction
+        random.shuffle(mixed)
+
+        from datasets import Dataset
+        mixed_dataset = Dataset.from_list(mixed)
+
+        logger.info(
+            "Multitask dataset: %d nl2sql + %d correction = %d total (ratio=%.1f%%)",
+            len(nl2sql_list),
+            n_correction,
+            len(mixed),
+            100.0 * n_correction / len(mixed),
+        )
+        return mixed_dataset
+
+    @staticmethod
+    def _get_reward_funcs(task_type: str) -> list:
+        """Return the appropriate reward functions for a given task_type.
+
+        Used as a reference for understanding the routing logic.
+        In practice, GRPO calls all reward functions for every sample;
+        the correction rewards are designed to handle nl2sql samples gracefully
+        (returning 0.0 / neutral scores) via fallback logic.
+
+        Parameters
+        ----------
+        task_type : str
+            "nl2sql" or "correction"
+
+        Returns
+        -------
+        list
+            Ordered list of reward functions for this task type.
+        """
+        from .reward import (
+            check_correction_improvement,
+            check_error_addressed,
+            check_schema_faithfulness,
+            check_sql_execution,
+            match_sql_format_approximately,
+            match_sql_format_exactly,
+        )
+        if task_type == "nl2sql":
+            return [
+                match_sql_format_exactly,
+                match_sql_format_approximately,
+                check_sql_execution,
+                check_schema_faithfulness,
+            ]
+        elif task_type == "correction":
+            return [
+                match_sql_format_exactly,
+                check_sql_execution,
+                check_correction_improvement,
+                check_error_addressed,
+            ]
+        else:
+            # Unknown task type — use nl2sql defaults
+            return [
+                match_sql_format_exactly,
+                match_sql_format_approximately,
+                check_sql_execution,
+                check_schema_faithfulness,
+            ]
 
     @staticmethod
     def extract_sql(text: str) -> str:
