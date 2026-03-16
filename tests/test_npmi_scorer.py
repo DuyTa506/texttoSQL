@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.retrieval.npmi_scorer import NPMIScorer
-from src.data.schema_chunker import SchemaChunk
+from src.schema.schema_chunker import SchemaChunk
 
 
 # ============================================================================

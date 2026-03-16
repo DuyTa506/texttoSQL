@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from src.data.base_adapter import Column, Database, Table
+from src.schema.models import Column, Database, Table
 from src.retrieval.value_scanner import ValueMatch, ValueScanner
 
 

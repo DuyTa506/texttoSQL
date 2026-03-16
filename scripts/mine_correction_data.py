@@ -177,9 +177,9 @@ def build_schema_context(db, example, retriever, linker, schema_filter, augmento
 
 def main(args):
     # ---- Load dataset ----
-    from src.data.schema_chunker import SchemaChunker
-    from src.data.schema_indexer import SchemaIndexer
-    from src.data.spider_v1_adapter import SpiderV1Adapter
+    from src.schema.schema_chunker import SchemaChunker
+    from src.schema.schema_indexer import SchemaIndexer
+    from src.data_parser import get_parser
     from src.post.sql_executor import ErrorType, SQLExecutor
     from src.retrieval.bidirectional_linker import BidirectionalLinker
     from src.retrieval.hybrid_retriever import HybridRetriever
@@ -187,7 +187,7 @@ def main(args):
     from src.retrieval.schema_filter import SchemaFilter
 
     logger.info("Loading dataset from: %s", args.data_path)
-    adapter = SpiderV1Adapter()
+    adapter = get_parser("spider_v1")
     databases, examples = adapter.load(args.data_path)
     db_map = {db.db_id: db for db in databases}
     logger.info("Loaded %d databases, %d examples", len(databases), len(examples))

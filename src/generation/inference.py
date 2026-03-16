@@ -297,6 +297,13 @@ class _OpenAIBackend:
     (Azure OpenAI, Together.ai, Groq, local vLLM, etc.).
     """
 
+    # Models that use hidden reasoning tokens (counted against max_completion_tokens).
+    # These need a much higher token budget than the visible output alone.
+    _REASONING_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini",
+                         "o4-mini",
+                         "gpt-5-nano", "gpt-5-mini", "gpt-5"}
+    _REASONING_MIN_TOKENS = 4096  # minimum budget for reasoning models
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -307,8 +314,21 @@ class _OpenAIBackend:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.api_base_url = api_base_url
+
+        # Auto-bump for reasoning models: reasoning tokens are hidden but
+        # counted against max_completion_tokens, so 512 is far too low.
+        if (model in self._REASONING_MODELS
+                and max_tokens < self._REASONING_MIN_TOKENS):
+            logger.info(
+                "Reasoning model '%s' detected — bumping max_tokens %d → %d "
+                "(reasoning tokens count against the limit).",
+                model, max_tokens, self._REASONING_MIN_TOKENS,
+            )
+            max_tokens = self._REASONING_MIN_TOKENS
+
         self.max_tokens = max_tokens
         self._client = None
+        self._compat_strategy: int | None = None  # cached working strategy index
 
     def _get_client(self):
         if self._client is not None:
@@ -338,19 +358,65 @@ class _OpenAIBackend:
         return self._client
 
     def complete(self, messages: list[dict], temperature: float = 0.0) -> str:
-        """Call the OpenAI Chat Completions API and return the assistant text."""
+        """Call the OpenAI Chat Completions API and return the assistant text.
+
+        Handles API differences across model generations:
+        - Newer reasoning models (o1, gpt-5-nano, etc.) require
+          ``max_completion_tokens`` and only accept ``temperature=1``.
+        - Older models use ``max_tokens`` and accept any temperature.
+        """
         client = self._get_client()
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=temperature,
-            )
+            response = self._call_with_compat(client, messages, temperature)
             return response.choices[0].message.content or ""
         except Exception as exc:
             logger.error("OpenAI API call failed: %s", exc)
             raise
+
+    def _call_with_compat(self, client, messages, temperature):
+        """Try the newest API surface first, then fall back progressively.
+
+        Caches the working strategy index after the first successful call
+        so subsequent calls go directly without retries.
+        """
+        strategies = [
+            {"max_completion_tokens": self.max_tokens, "temperature": temperature},
+            {"max_completion_tokens": self.max_tokens},
+            {"max_tokens": self.max_tokens, "temperature": temperature},
+        ]
+
+        # Fast path: use cached strategy
+        if self._compat_strategy is not None:
+            return client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **strategies[self._compat_strategy],
+            )
+
+        # Discovery: try each strategy
+        last_err = None
+        for idx, kwargs in enumerate(strategies):
+            try:
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    **kwargs,
+                )
+                self._compat_strategy = idx
+                logger.info(
+                    "OpenAI compat: strategy %d works for %s (%s)",
+                    idx, self.model, list(kwargs.keys()),
+                )
+                return response
+            except Exception as err:
+                err_msg = str(err)
+                if ("max_completion_tokens" in err_msg
+                        or "max_tokens" in err_msg
+                        or "temperature" in err_msg):
+                    last_err = err
+                    continue
+                raise
+        raise last_err
 
 
 # ── Shared prompt / output helpers ────────────────────────────────────────────

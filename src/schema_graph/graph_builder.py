@@ -291,6 +291,7 @@ class SchemaGraph:
         max_nodes: int = 20,
         synonym_tokens: Optional[set[str]] = None,
         synonym_boost: float = 0.3,
+        value_matched_nodes: Optional[dict[str, float]] = None,
     ) -> list[tuple[KGNode, float]]:
         """
         Retrieve a relevant schema subgraph for the given query embedding via
@@ -334,6 +335,11 @@ class SchemaGraph:
         synonym_boost:
             Score increment added to nodes whose synonyms intersect with
             *synonym_tokens*.
+        value_matched_nodes:
+            Optional mapping ``{node_id → boost_score}`` from ValueScanner
+            matches (v3).  Boosts are merged into the entry-point scores
+            before PPR seed selection, ensuring columns containing matched
+            cell values are strongly seeded.
 
         Returns
         -------
@@ -387,6 +393,14 @@ class SchemaGraph:
                 and (db_id is None or attrs["data"].db_id == db_id)
             ]
             return [(n, 0.0) for n in fallback[:max_nodes]]
+
+        # ── Step 2b (v3): Merge value-based seed boosts ──────────────────────
+        if value_matched_nodes:
+            for nid, boost in value_matched_nodes.items():
+                if nid in scores:
+                    scores[nid] = min(scores[nid] + boost, 1.0)
+                else:
+                    scores[nid] = boost
 
         # ── Step 3: Seed nodes → personalization dict ─────────────────────────
         sorted_seeds = sorted(scores.items(), key=lambda x: x[1], reverse=True)

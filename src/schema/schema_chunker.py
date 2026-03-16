@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .base_adapter import Database
+from .models import Database
 
 
 @dataclass

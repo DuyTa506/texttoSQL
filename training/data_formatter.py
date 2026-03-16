@@ -19,7 +19,7 @@ from pathlib import Path
 
 # Import from src if available, otherwise work standalone
 try:
-    from src.data.base_adapter import Database, Example
+    from src.schema.models import Database, Example
 except ImportError:
     Database = None
     Example = None

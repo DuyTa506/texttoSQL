@@ -10,7 +10,7 @@ Two providers are supported:
 
 Use LLMFactory to construct instances from config dicts:
 
-    from llms import LLMFactory
+    from src.llms import LLMFactory
 
     llm = LLMFactory.openai("gpt-4o-mini")
     llm = LLMFactory.huggingface("./checkpoints/sft/final", load_in_4bit=True)

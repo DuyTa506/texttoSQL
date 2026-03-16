@@ -528,14 +528,14 @@ def _call_openai(prompt: str, model: str, api_key: Optional[str]) -> str:
         raise ImportError("pip install openai to use OpenAI enrichment models")
 
     client = openai.OpenAI(api_key=api_key)
+    # Some models (e.g. gpt-5-nano) only support temperature=1 (the default),
+    # so we omit the parameter entirely to let the API use its default.
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": prompt},
         ],
-        temperature=0.2,
-        response_format={"type": "json_object"},
     )
     return response.choices[0].message.content or ""
 
@@ -552,7 +552,6 @@ def _call_anthropic(prompt: str, model: str, api_key: Optional[str]) -> str:
         max_tokens=4096,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
     )
     return response.content[0].text if response.content else ""
 
@@ -660,7 +659,8 @@ def _open_chroma_collection(persist_dir: str, collection_name: str):
     )
 
 
-def _parse_json_response(raw: str) -> dict:    """
+def _parse_json_response(raw: str) -> dict:
+    """
     Parse a JSON response from the LLM.
 
     Handles:

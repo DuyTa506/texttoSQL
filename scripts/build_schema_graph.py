@@ -66,7 +66,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.spider_v1_adapter import SpiderV1Adapter
+from src.data_parser import get_parser
 from src.schema_graph import (
     SchemaGraph,
     SchemaGraphBuilder,
@@ -122,6 +122,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--db_filter", default="",
         help="If set, process only this single database (by db_id).",
+    )
+    p.add_argument(
+        "--adapter", default="spider_v1",
+        help="Dataset adapter to use (spider_v1 | bird).",
     )
 
     # ── Layer 2a: Lexical semantic edges ─────────────────────────────────────
@@ -246,7 +250,7 @@ def main() -> None:
         # If statistical edges are needed, still load examples for co-occurrence
         if (args.statistical or args.value_overlap) and args.data_path:
             logger.info("Loading examples from %s for statistical edges ...", args.data_path)
-            adapter = SpiderV1Adapter()
+            adapter = get_parser(args.adapter)
             databases, examples = adapter.load(args.data_path)
     else:
         if not args.data_path:
@@ -257,7 +261,7 @@ def main() -> None:
             sys.exit(1)
 
         logger.info("Loading dataset from %s ...", args.data_path)
-        adapter = SpiderV1Adapter()
+        adapter = get_parser(args.adapter)
         databases, examples = adapter.load(args.data_path)
         logger.info("Loaded %d databases, %d examples", len(databases), len(examples))
 

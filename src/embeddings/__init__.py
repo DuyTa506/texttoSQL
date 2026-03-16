@@ -1,28 +1,44 @@
 """
 Embedding model submodule.
 
-Current provider:
-  HuggingFaceEmbeddingModel  — sentence-transformers (no extra deps)
+Providers:
+  OpenAIEmbeddingModel       — OpenAI Embeddings API (no torch required)
+  HuggingFaceEmbeddingModel  — sentence-transformers (requires torch)
 
-Default model: ``paraphrase-multilingual-mpnet-base-v2`` (768-dim)
-  matches the existing SchemaIndexer so no re-indexing is needed.
+Default for pipeline: ``OpenAIEmbeddingModel`` with ``text-embedding-3-large``
+  (3072-dim, set via OPENAI_API_KEY env var or .env file).
 
 Usage:
 
-    from embeddings import HuggingFaceEmbeddingModel
+    from src.embeddings import OpenAIEmbeddingModel
 
-    model = HuggingFaceEmbeddingModel()                           # default
-    model = HuggingFaceEmbeddingModel("BAAI/bge-m3")             # swap model
-    model = HuggingFaceEmbeddingModel(device="cuda")             # explicit device
+    model = OpenAIEmbeddingModel()                                  # default
+    model = OpenAIEmbeddingModel("text-embedding-3-small")          # cheaper
 
-    vectors = model.embed(["What are the top 5 products?"])      # list of texts
-    vec     = model.embed_one("What are the top 5 products?")    # single text
+    # Local (requires torch + sentence-transformers):
+    from src.embeddings import HuggingFaceEmbeddingModel
+    model = HuggingFaceEmbeddingModel()                             # default
+    model = HuggingFaceEmbeddingModel("BAAI/bge-m3")                # swap model
+
+    vectors = model.embed(["What are the top 5 products?"])         # list of texts
+    vec     = model.embed_one("What are the top 5 products?")       # single text
 """
 
 from .base import BaseEmbeddingModel
-from .huggingface import HuggingFaceEmbeddingModel
+from .openai import OpenAIEmbeddingModel
 
 __all__ = [
     "BaseEmbeddingModel",
-    "HuggingFaceEmbeddingModel",
+    "OpenAIEmbeddingModel",
 ]
+
+# HuggingFaceEmbeddingModel is lazy-imported to avoid pulling in torch
+# when only OpenAI embeddings are needed.
+
+
+def __getattr__(name: str):
+    if name == "HuggingFaceEmbeddingModel":
+        from .huggingface import HuggingFaceEmbeddingModel
+
+        return HuggingFaceEmbeddingModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

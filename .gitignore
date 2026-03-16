@@ -21,10 +21,13 @@ venv/
 datasets/data/
 data/spider/
 data/chroma_db/
+data/chroma_db_bird*/
+data/schema_graphs/
 data/processed/
 data/sft/
 data/sft_test/
 data/npmi_matrix.json
+data/correction/
 OmniSQL/
 models/
 checkpoints/
@@ -42,3 +45,6 @@ DDP.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets
+.env

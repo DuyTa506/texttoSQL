@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Optional, Union
 
-from ..data.base_adapter import Database
+from ..schema.models import Database
 
 
 class QueryAugmentor:

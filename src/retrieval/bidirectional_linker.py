@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from ..data.base_adapter import Database
-from ..data.schema_chunker import SchemaChunk
+from ..schema.models import Database
+from ..schema.schema_chunker import SchemaChunk
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
-from ..data.base_adapter import Database
+from ..schema.models import Database
 
 logger = logging.getLogger(__name__)
 

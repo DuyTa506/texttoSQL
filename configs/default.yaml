@@ -21,7 +21,12 @@ chunking:
 
 # --- Embedding & Indexing ---
 indexing:
-  embedding_model: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+  embedding_provider: "openai"            # "openai" | "huggingface"
+  embedding_model: "text-embedding-3-large"   # model name for the chosen provider
+  # OpenAI-specific (only used when embedding_provider=openai):
+  embedding_api_key: ""                   # leave empty to read from OPENAI_API_KEY env var
+  embedding_base_url: ""                  # custom base URL for OpenAI-compatible endpoints
+  # ChromaDB settings:
   chroma_persist_dir: "./data/chroma_db"
   collection_name: "schema_chunks"
   batch_size: 128
@@ -63,6 +68,10 @@ schema_graph:
   score_threshold: 0.05                   # Min PPR score to include a node
   max_nodes: 20                           # Hard cap on returned nodes per query
   synonym_boost: 0.3                      # Extra score for synonym token match
+  # v3 parameters
+  score_gap_ratio: 3.0                    # Base gap ratio (adapted per-DB at runtime)
+  use_fk_bridge: true                     # FK bridge table injection
+  value_seed_boost: 0.5                   # Boost factor for value-matched nodes
   # Hybrid mode: merge GraphRetriever + HybridRetriever results via RRF
   hybrid: false                            # Set true to fuse both retrievers
 

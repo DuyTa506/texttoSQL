@@ -57,7 +57,7 @@ from src.schema_graph.edge_builders.structural_edges import tokenize_name
 
 if TYPE_CHECKING:
     from src.schema_graph.graph_builder import SchemaGraph
-    from src.data.base_adapter import Example
+    from src.schema.models import Example
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +69,15 @@ DEFAULT_SELECT_THRESHOLD: float = 0.10        # min normalised co-occurrence for
 DEFAULT_VALUE_OVERLAP_THRESHOLD: float = 0.20 # min Jaccard for VALUE_OVERLAP
 DEFAULT_MAX_DISTINCT_VALUES: int = 500        # skip high-cardinality columns
 
-W_CO_JOIN_MAX: float = 0.80
+W_CO_JOIN_MAX: float = 0.50                     # v3: reduced from 0.80 to limit noise
 W_CO_PREDICATE_MAX: float = 0.75
 W_CO_SELECT_MAX: float = 0.70
 W_VALUE_OVERLAP_MAX: float = 0.85
+
+# v3: Inferred FK from VALUE_OVERLAP (for DBs lacking explicit FK declarations)
+W_INFERRED_FK: float = 0.80
+INFERRED_FK_JACCARD_THRESHOLD: float = 0.50      # min Jaccard to infer FK
+INFERRED_FK_MIN_SHARED: int = 3                   # min shared values to infer FK
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +387,16 @@ def build_value_overlap_edges(
 
         # Pairwise Jaccard on value sets
         node_ids = list(col_values.keys())
+        # Track existing FK edges to avoid duplicating as INFERRED_FK
+        existing_fk_pairs: set[frozenset[str]] = set()
+        for _, _, attrs in graph.G.edges(data=True):
+            edge_data = attrs.get("data")
+            if edge_data and edge_data.edge_type in (EdgeType.FOREIGN_KEY, EdgeType.FOREIGN_KEY_REV):
+                existing_fk_pairs.add(frozenset([edge_data.src_id, edge_data.dst_id]))
+
+        # Track inferred table-FK pairs for deduplication
+        inferred_table_fk_pairs: set[frozenset[str]] = set()
+
         for id_a, id_b in combinations(node_ids, 2):
             vals_a = col_values[id_a]
             vals_b = col_values[id_b]
@@ -407,9 +422,45 @@ def build_value_overlap_edges(
             }
             edges.extend(_bidir(id_a, id_b, EdgeType.VALUE_OVERLAP, weight, meta))
 
+            # v3: Emit INFERRED_FK edges for high-overlap column pairs
+            if (j >= INFERRED_FK_JACCARD_THRESHOLD
+                    and len(shared) >= INFERRED_FK_MIN_SHARED
+                    and frozenset([id_a, id_b]) not in existing_fk_pairs):
+                node_a = graph.nodes.get(id_a)
+                node_b = graph.nodes.get(id_b)
+                if node_a and node_b and node_a.table_name != node_b.table_name:
+                    inferred_meta = {
+                        "source": "value_overlap",
+                        "jaccard": round(j, 4),
+                        "shared_count": len(shared),
+                    }
+                    # Column-level INFERRED_FK
+                    edges.extend(_bidir(id_a, id_b, EdgeType.INFERRED_FK, W_INFERRED_FK, inferred_meta))
+
+                    # Table-level TABLE_FK (deduplicated)
+                    tbl_a_id = f"{current_db}.{node_a.table_name}"
+                    tbl_b_id = f"{current_db}.{node_b.table_name}"
+                    tbl_pair = frozenset([tbl_a_id, tbl_b_id])
+                    if tbl_pair not in inferred_table_fk_pairs:
+                        inferred_table_fk_pairs.add(tbl_pair)
+                        tbl_meta = {
+                            "source": "value_overlap",
+                            "jaccard": round(j, 4),
+                            "shared_count": len(shared),
+                            "inferred_from": [id_a, id_b],
+                        }
+                        edges.extend(_bidir(tbl_a_id, tbl_b_id, EdgeType.TABLE_FK, W_INFERRED_FK, tbl_meta))
+
+    inferred_fk_count = sum(1 for e in edges if e.edge_type == EdgeType.INFERRED_FK) // 2
+    inferred_table_fk_count = sum(
+        1 for e in edges if e.edge_type == EdgeType.TABLE_FK
+    ) // 2
     logger.info(
-        "build_value_overlap_edges: %d VALUE_OVERLAP edges across %d database(s)",
-        len(edges) // 2,
+        "build_value_overlap_edges: %d VALUE_OVERLAP + %d INFERRED_FK + %d TABLE_FK "
+        "edges across %d database(s)",
+        (len(edges) - inferred_fk_count * 2 - inferred_table_fk_count * 2) // 2,
+        inferred_fk_count,
+        inferred_table_fk_count,
         len(target_dbs),
     )
     return edges

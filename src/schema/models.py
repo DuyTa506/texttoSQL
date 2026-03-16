@@ -1,15 +1,13 @@
 """
-Base adapter interface for dataset loading.
+Standard data models for Text-to-SQL.
 
-All dataset adapters (Spider 1.0, Spider 2.0, MultiSpider) implement this
-interface to convert their native format into a unified internal representation.
+Defines the core dataclasses shared across the entire project:
+``Column``, ``Table``, ``ForeignKey``, ``Database``, ``Example``.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 
@@ -81,24 +79,4 @@ class Example:
     query: str  # gold SQL
     lang: str = "en"
     difficulty: str = "unknown"
-
-
-# =============================================================================
-# Abstract Adapter
-# =============================================================================
-
-class BaseAdapter(ABC):
-    """Abstract adapter that loads a dataset into the standard format."""
-
-    @abstractmethod
-    def load(self, path: str | Path) -> tuple[list[Database], list[Example]]:
-        """Load databases and examples from *path*.
-
-        Returns
-        -------
-        databases : list[Database]
-            Schema information for every database in the dataset.
-        examples : list[Example]
-            Question / SQL pairs, each referencing a ``db_id``.
-        """
-        ...
+    evidence: str = ""  # domain hint (e.g. BIRD "evidence" field)

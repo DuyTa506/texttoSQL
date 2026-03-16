@@ -5,7 +5,6 @@ description = "Text-to-SQL Research Baseline: Schema Knowledge Graph + 4-Phase R
 requires-python = ">=3.10"
 dependencies = [
     # Embeddings & Retrieval
-    "sentence-transformers>=2.6.0",
     "chromadb>=0.5.0",
     "rank-bm25>=0.2.2",
     # Schema Knowledge Graph
@@ -13,6 +12,7 @@ dependencies = [
     # LLM provider (OpenAI + compatible endpoints)
     "openai>=1.30.0",
     # Utilities
+    "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "sqlparse>=0.5.0",
     "pydantic>=2.0",
@@ -42,6 +42,11 @@ hf = [
     "transformers>=4.40.0",
     "bitsandbytes>=0.43.0",   # optional: 4-bit quantization (load_in_4bit)
 ]
+# Local sentence-transformers embeddings (HuggingFaceEmbeddingModel)
+# Not needed when using OpenAI embeddings (embedding_provider=openai).
+local-embeddings = [
+    "sentence-transformers>=2.6.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
@@ -59,7 +64,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src", "training", "llms", "embeddings"]
+packages = ["src", "training"]
 
 # ---------------------------------------------------------------------------
 # uv configuration

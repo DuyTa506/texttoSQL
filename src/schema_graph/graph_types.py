@@ -58,6 +58,10 @@ class EdgeType(str, Enum):
     FOREIGN_KEY_REV = "foreign_key_rev"
     PRIMARY_KEY_OF = "primary_key_of"
     DB_HAS_TABLE = "db_has_table"
+    TABLE_FK = "table_fk"                    # Table→Table shortcut for FK (v3)
+    TABLE_FK_REV = "table_fk_rev"            # Reverse table-level FK shortcut (v3)
+    INFERRED_FK = "inferred_fk"              # Column→Column inferred from value overlap (v3)
+    INFERRED_FK_REV = "inferred_fk_rev"      # Reverse inferred FK (v3)
 
     # ── Layer 2 ───────────────────────────────────────────────────────────────
     LEXICAL_SIMILAR = "lexical_similar"
@@ -79,6 +83,10 @@ STRUCTURAL_EDGE_TYPES: frozenset[EdgeType] = frozenset({
     EdgeType.FOREIGN_KEY_REV,
     EdgeType.PRIMARY_KEY_OF,
     EdgeType.DB_HAS_TABLE,
+    EdgeType.TABLE_FK,
+    EdgeType.TABLE_FK_REV,
+    EdgeType.INFERRED_FK,
+    EdgeType.INFERRED_FK_REV,
 })
 
 SEMANTIC_EDGE_TYPES: frozenset[EdgeType] = frozenset({
@@ -184,7 +192,7 @@ class KGNode:
             "sample_values": self.sample_values,
             "description": self.description,
             "synonyms": self.synonyms,
-            "embedding": self.embedding,
+            "embedding": self.embedding.tolist() if self.embedding is not None and hasattr(self.embedding, 'tolist') else self.embedding,
         }
 
     @classmethod

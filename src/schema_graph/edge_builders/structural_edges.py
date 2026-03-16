@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from src.schema_graph.graph_types import EdgeType, KGEdge, KGNode, NodeType
 
 if TYPE_CHECKING:
-    from src.data.base_adapter import Database
+    from src.schema.models import Database
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ W_OWNERSHIP = 1.0          # DB_HAS_TABLE
 W_MEMBERSHIP = 1.0         # TABLE_HAS_COLUMN / COLUMN_BELONGS_TO
 W_PRIMARY_KEY = 1.0        # PRIMARY_KEY_OF
 W_FOREIGN_KEY = 0.95       # FOREIGN_KEY / FOREIGN_KEY_REV
+W_TABLE_FK = 0.85          # TABLE_FK / TABLE_FK_REV (table-level FK shortcut, v3)
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +175,48 @@ def build_structural_edges(
         if col_id in nodes:
             nodes[col_id].is_fk = True
 
+    # ── 5b. TABLE_FK shortcut edges (v3) ────────────────────────────────────
+    # Add direct Table→Table edges for each FK relationship so PPR can hop
+    # between tables in 1 step instead of the 4-hop Table→Col→Col→Table path.
+    # Deduplicate: multiple FK columns between the same table pair → one edge.
+    table_fk_pairs: dict[tuple[str, str], list[dict]] = {}
+    for fk in db.foreign_keys:
+        from_tbl_id = f"{db.db_id}.{fk.from_table}"
+        to_tbl_id = f"{db.db_id}.{fk.to_table}"
+        if from_tbl_id not in nodes or to_tbl_id not in nodes:
+            continue
+        pair_key = (from_tbl_id, to_tbl_id)
+        if pair_key not in table_fk_pairs:
+            table_fk_pairs[pair_key] = []
+        table_fk_pairs[pair_key].append({
+            "from_column": fk.from_column,
+            "to_column": fk.to_column,
+        })
+
+    for (from_tbl_id, to_tbl_id), fk_col_list in table_fk_pairs.items():
+        meta = {"fk_columns": fk_col_list}
+        edges.append(KGEdge(
+            src_id=from_tbl_id,
+            dst_id=to_tbl_id,
+            edge_type=EdgeType.TABLE_FK,
+            weight=W_TABLE_FK,
+            metadata=meta,
+        ))
+        edges.append(KGEdge(
+            src_id=to_tbl_id,
+            dst_id=from_tbl_id,
+            edge_type=EdgeType.TABLE_FK_REV,
+            weight=W_TABLE_FK,
+            metadata=meta,
+        ))
+
     logger.debug(
-        "[%s] structural edges: %d ownership, %d membership, %d FK",
+        "[%s] structural edges: %d ownership, %d membership, %d FK, %d TABLE_FK",
         db.db_id,
         sum(1 for e in edges if e.edge_type == EdgeType.DB_HAS_TABLE),
         sum(1 for e in edges if e.edge_type in (EdgeType.TABLE_HAS_COLUMN, EdgeType.COLUMN_BELONGS_TO)),
         sum(1 for e in edges if e.edge_type in (EdgeType.FOREIGN_KEY, EdgeType.FOREIGN_KEY_REV)),
+        sum(1 for e in edges if e.edge_type in (EdgeType.TABLE_FK, EdgeType.TABLE_FK_REV)),
     )
 
     return edges

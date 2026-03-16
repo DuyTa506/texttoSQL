@@ -155,9 +155,20 @@ class GraphRetriever:
         query: str,
         *,
         db_id: Optional[str] = None,
+        value_matches: Optional[list] = None,
     ) -> list[dict]:
         """
         Retrieve relevant schema nodes for *query* via PPR.
+
+        Parameters
+        ----------
+        query:
+            Natural language question.
+        db_id:
+            Restrict to one database.
+        value_matches:
+            Optional list of ``ValueMatch`` objects from ValueScanner (v3).
+            When provided, matched columns/tables get boosted PPR seeds.
 
         Returns
         -------
@@ -174,6 +185,17 @@ class GraphRetriever:
         # don't return 20 nodes when they only have 5 tables.
         adaptive_max = self._adaptive_max_nodes(db_id)
 
+        # v3: Convert ValueMatch list → {node_id → boost} dict
+        value_boost: Optional[dict[str, float]] = None
+        if value_matches:
+            value_boost = {}
+            for m in value_matches:
+                col_nid = f"{db_id}.{m.table_name}.{m.column_name}" if db_id else f"{m.table_name}.{m.column_name}"
+                value_boost[col_nid] = max(value_boost.get(col_nid, 0), m.score * 0.5)
+                # Also boost the parent table node
+                tbl_nid = f"{db_id}.{m.table_name}" if db_id else m.table_name
+                value_boost[tbl_nid] = max(value_boost.get(tbl_nid, 0), m.score * 0.3)
+
         # PPR retrieval from graph — now returns list[tuple[KGNode, float]] (Fix 1)
         ppr_nodes_with_scores: list[tuple[KGNode, float]] = self.graph.retrieve(
             q_emb,
@@ -185,6 +207,7 @@ class GraphRetriever:
             max_nodes=adaptive_max,
             synonym_tokens=synonym_tokens,
             synonym_boost=self.synonym_boost,
+            value_matched_nodes=value_boost,
         )
 
         # Fix 6: FK bridge table injection — must run BEFORE gap pruning so
@@ -195,7 +218,10 @@ class GraphRetriever:
             )
 
         # Fix 3: Score gap pruning — remove low-confidence tail nodes.
-        ppr_nodes_with_scores = self._apply_score_gap_pruning(ppr_nodes_with_scores)
+        # v3: Pass db_id for per-DB adaptive gap ratio.
+        ppr_nodes_with_scores = self._apply_score_gap_pruning(
+            ppr_nodes_with_scores, db_id=db_id
+        )
 
         # Fix 1: Pass real scores to _nodes_to_dicts
         graph_results = self._nodes_to_dicts(ppr_nodes_with_scores, db_id=db_id)
@@ -214,6 +240,7 @@ class GraphRetriever:
         queries: list[str],
         *,
         db_id: Optional[str] = None,
+        value_matches: Optional[list] = None,
     ) -> list[dict]:
         """
         Retrieve for multiple sub-queries and merge via RRF.
@@ -227,6 +254,9 @@ class GraphRetriever:
             Sub-queries (e.g. from ``QuestionDecomposer``).
         db_id:
             Restrict to one database.
+        value_matches:
+            Optional list of ``ValueMatch`` objects (v3), passed to each
+            sub-query retrieval.
 
         Returns
         -------
@@ -236,10 +266,10 @@ class GraphRetriever:
         if not queries:
             return []
         if len(queries) == 1:
-            return self.retrieve(queries[0], db_id=db_id)
+            return self.retrieve(queries[0], db_id=db_id, value_matches=value_matches)
 
         per_query: list[list[dict]] = [
-            self.retrieve(q, db_id=db_id) for q in queries
+            self.retrieve(q, db_id=db_id, value_matches=value_matches) for q in queries
         ]
         # Fix 8: For multi-query fusion all lists are equal-weight (no graph vs.
         # hybrid distinction), so use the first list as "graph" and the rest as
@@ -398,7 +428,10 @@ class GraphRetriever:
             Extended list with bridge tables appended.
         """
         all_nodes = self.graph.nodes
-        fk_edge_types = {EdgeType.FOREIGN_KEY, EdgeType.FOREIGN_KEY_REV}
+        fk_edge_types = {
+            EdgeType.FOREIGN_KEY, EdgeType.FOREIGN_KEY_REV,
+            EdgeType.INFERRED_FK, EdgeType.INFERRED_FK_REV,  # v3: also follow inferred FKs
+        }
 
         retrieved_tables: set[str] = {
             n.table_name for n, _ in nodes_with_scores
@@ -451,6 +484,7 @@ class GraphRetriever:
         self,
         nodes_with_scores: list[tuple[KGNode, float]],
         min_keep: int = 2,
+        db_id: Optional[str] = None,
     ) -> list[tuple[KGNode, float]]:
         """
         Remove low-confidence tail nodes via an elbow-cut heuristic.
@@ -458,6 +492,10 @@ class GraphRetriever:
         If two consecutive nodes have a score ratio (prev/curr) exceeding
         ``score_gap_ratio``, all nodes from the lower one onward are pruned.
         At least ``min_keep`` nodes are always retained.
+
+        v3: Per-DB adaptive gap ratio — large DBs (≥10 tables) use a looser
+        threshold to avoid pruning needed tables; small DBs (≤4 tables) use a
+        tighter threshold to suppress noise.
 
         Example: scores [0.15, 0.14, 0.12, 0.06] with gap_ratio=3.0
           → 0.12 / 0.06 = 2.0  (no gap)
@@ -468,7 +506,17 @@ class GraphRetriever:
           → 0.30 / 0.05 = 6.0  (gap!)  → prune from index 1 onward
           → keeps only [0.30]  (capped at min_keep=2: keeps [0.30, 0.05])
         """
+        # v3: Adaptive gap ratio based on DB table count
         gap_ratio = self.score_gap_ratio
+        if db_id is not None:
+            table_count = sum(
+                1 for n in self.graph.nodes_for_db(db_id)
+                if n.node_type == NodeType.TABLE
+            )
+            if table_count >= 10:
+                gap_ratio = max(self.score_gap_ratio, 4.5)  # looser for large DBs
+            elif table_count <= 4:
+                gap_ratio = min(self.score_gap_ratio, 2.0)  # tighter for small DBs
         if gap_ratio <= 0 or len(nodes_with_scores) <= min_keep:
             return nodes_with_scores
 

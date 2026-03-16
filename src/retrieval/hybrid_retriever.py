@@ -10,8 +10,8 @@ from typing import Optional
 
 from rank_bm25 import BM25Okapi
 
-from ..data.schema_chunker import SchemaChunk
-from ..data.schema_indexer import SchemaIndexer
+from ..schema.schema_chunker import SchemaChunk
+from ..schema.schema_indexer import SchemaIndexer
 from .npmi_scorer import NPMIScorer
 
 logger = logging.getLogger(__name__)

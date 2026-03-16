@@ -335,6 +335,14 @@ def parse_args():
     p.add_argument("--rrf_k",          type=int,   default=60)
     p.add_argument("--chroma_dir",     default=CHROMA_DIR_DEFAULT,
                    help="ChromaDB persist directory (use separate dirs to run in parallel)")
+    p.add_argument("--score_gap_ratio", type=float, default=3.0,
+                   help="Elbow-cut threshold for pruning low-confidence tail nodes (v3)")
+    p.add_argument("--use_fk_bridge", action="store_true", default=True,
+                   help="Inject FK-connected bridge tables missing from PPR results (v3)")
+    p.add_argument("--no_fk_bridge", dest="use_fk_bridge", action="store_false",
+                   help="Disable FK bridge injection")
+    p.add_argument("--value_scan", action="store_true", default=False,
+                   help="Enable ValueScanner for seed boosting (v3)")
     return p.parse_args()
 
 
@@ -412,6 +420,8 @@ def main():
                 top_m=args.top_m, alpha=args.alpha,
                 max_nodes=args.max_nodes, score_threshold=args.score_threshold,
                 hybrid_retriever=_build_hybrid(), rrf_k=args.rrf_k,
+                score_gap_ratio=args.score_gap_ratio,
+                use_fk_bridge=args.use_fk_bridge,
             )
             linker         = None
             retriever_name = "GraphRetriever+HybridRetriever (RRF)"
@@ -420,6 +430,8 @@ def main():
                 graph, embedder,
                 top_m=args.top_m, alpha=args.alpha,
                 max_nodes=args.max_nodes, score_threshold=args.score_threshold,
+                score_gap_ratio=args.score_gap_ratio,
+                use_fk_bridge=args.use_fk_bridge,
             )
             linker         = None
             retriever_name = "GraphRetriever (PPR)"
@@ -429,6 +441,13 @@ def main():
             max_expansion_depth=ret_cfg["bidirectional"]["max_expansion_depth"],
         )
         retriever_name = "HybridRetriever (BM25+Semantic)"
+
+    # ── ValueScanner (v3 seed boosting) ────────────────────────────────────────
+    value_scanner = None
+    if args.value_scan and use_graph:
+        from src.retrieval.value_scanner import ValueScanner
+        value_scanner = ValueScanner(max_values_per_col=500, top_k=5, min_score=0.75)
+        logger.info("ValueScanner enabled for seed boosting")
 
     # ── Per-example loop ───────────────────────────────────────────────────────
     results = []
@@ -453,10 +472,24 @@ def main():
 
         aug_query = augmentor.augment(question, db)
 
+        # ── Value scanning (v3) ──
+        value_matches = None
+        if value_scanner is not None:
+            try:
+                value_matches = value_scanner.scan(question, db)
+            except Exception:
+                pass
+
         if isinstance(aug_query, list):
-            raw = retriever.retrieve_multi(aug_query, db_id=ex.db_id)
+            if use_graph:
+                raw = retriever.retrieve_multi(aug_query, db_id=ex.db_id, value_matches=value_matches)
+            else:
+                raw = retriever.retrieve_multi(aug_query, db_id=ex.db_id)
         else:
-            raw = retriever.retrieve(aug_query, db_id=ex.db_id)
+            if use_graph:
+                raw = retriever.retrieve(aug_query, db_id=ex.db_id, value_matches=value_matches)
+            else:
+                raw = retriever.retrieve(aug_query, db_id=ex.db_id)
 
         if linker is not None:
             db_chunks = [c for c in all_chunks if c.db_id == ex.db_id]
@@ -863,7 +896,10 @@ def main():
                 "n_examples": len(results),
                 **({"graph_path": args.graph_path, "top_m": args.top_m,
                     "alpha": args.alpha, "max_nodes": args.max_nodes,
-                    "score_threshold": args.score_threshold} if use_graph else {}),
+                    "score_threshold": args.score_threshold,
+                    "score_gap_ratio": args.score_gap_ratio,
+                    "use_fk_bridge": args.use_fk_bridge,
+                    "value_scan": args.value_scan} if use_graph else {}),
             },
             "overall": {
                 "table_recall":     tr,  "table_precision":  tp,  "table_f1":  tf1,

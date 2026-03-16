@@ -242,29 +242,38 @@ A typed heterogeneous graph built from database schemas. Three layers of edges w
 | `COLUMN` | `{db_id}.{table}.{col}` | Column node with dtype, PK/FK flags, sample values, description, synonyms, embedding |
 
 #### Edge types by layer (`EdgeType`)
-| Layer | EdgeType | Weight cap | Meaning |
+| Layer | EdgeType | Weight | Meaning |
 |---|---|---|---|
-| 1 | `TABLE_CONTAINS` | 1.0 | Table → Column membership |
-| 1 | `FK_REFERENCE` | 0.95 | Foreign key relationship |
-| 1 | `PK_COLUMN` | 0.90 | Primary key marker |
-| 1 | `SAME_TABLE` | 0.50 | Column ↔ Column (sibling) |
-| 2 | `LEXICAL_SIMILAR` | 0.70 | Jaccard on name tokens (with stopword penalty) |
-| 2 | `EMBEDDING_SIMILAR` | 0.90 | Cosine on LLM-enriched description vectors |
-| 2 | `SYNONYM_MATCH` | 0.85 | Shared synonym tokens |
-| 3 | `CO_JOIN` | 0.80 | Tables co-occur in FROM/JOIN (training SQL corpus) |
-| 3 | `CO_PREDICATE` | 0.75 | Columns co-occur in WHERE/HAVING |
-| 3 | `CO_SELECT` | 0.70 | Columns co-occur in SELECT list |
-| 3 | `VALUE_OVERLAP` | 0.85 | Jaccard on DISTINCT SQLite cell values |
+| 1 | `DB_HAS_TABLE` | 1.0 | Database → Table ownership |
+| 1 | `TABLE_HAS_COLUMN` / `COLUMN_BELONGS_TO` | 1.0 | Table ↔ Column membership (bidirectional) |
+| 1 | `PRIMARY_KEY_OF` | 1.0 | PK column → Table annotation |
+| 1 | `FOREIGN_KEY` / `FOREIGN_KEY_REV` | 0.95 | Column-level FK constraint (bidirectional) |
+| 1 | `TABLE_FK` / `TABLE_FK_REV` | 0.85 | **v3**: Table-level FK shortcut (1-hop instead of 4-hop Table→Col→Col→Table) |
+| 1 | `INFERRED_FK` / `INFERRED_FK_REV` | 0.95 | **v3**: Column FK inferred from high VALUE_OVERLAP (Jaccard ≥ 0.5) |
+| 2a | `LEXICAL_SIMILAR` | ≤0.70 | Jaccard on name tokens (with stopword penalty) |
+| 2b | `EMBEDDING_SIMILAR` | ≤0.90 | Cosine on LLM-enriched description vectors |
+| 2b | `SYNONYM_MATCH` | ≤0.85 | Shared synonym tokens |
+| 3 | `CO_JOIN` | ≤0.50 | Tables co-occur in FROM/JOIN (**v3**: capped 0.80→0.50) |
+| 3 | `CO_PREDICATE` | ≤0.75 | Columns co-occur in WHERE/HAVING |
+| 3 | `CO_SELECT` | ≤0.70 | Columns co-occur in SELECT list |
+| 3 | `VALUE_OVERLAP` | ≤0.85 | Jaccard on DISTINCT SQLite cell values |
 
-All edges are **bidirectional** (A→B and B→A both stored). Edge weight order: FK (0.95) > PK (0.90) > EMBEDDING_SIMILAR (0.90) > SYNONYM_MATCH (0.85) > VALUE_OVERLAP (0.85) > CO_JOIN (0.80) > LEXICAL_SIMILAR (0.70).
+All edges are **bidirectional** (A→B and B→A both stored). Edge weight order: FK / INFERRED_FK (0.95) > EMBEDDING_SIMILAR (0.90) > TABLE_FK (0.85) > SYNONYM_MATCH (0.85) > VALUE_OVERLAP (0.85) > CO_PREDICATE (0.75) > LEXICAL_SIMILAR (0.70) > CO_JOIN (0.50).
 
-#### PPR Retrieval (`SchemaGraph.retrieve()`)
+#### PPR Retrieval (`GraphRetriever.retrieve()`)
 ```
-1. Embed question → cosine score against all COLUMN + TABLE nodes
-2. Synonym token boost: nodes whose synonyms share tokens with the question get +boost
-3. Top-M nodes selected as PPR seeds with personalisation vector proportional to cosine score
-4. Power iteration: score[t+1] = alpha * A * score[t] + (1-alpha) * personalization
-5. Return all nodes with final score > threshold, sorted descending, capped at max_nodes
+1. Embed question → cosine score against all COLUMN + TABLE nodes with embeddings
+2. Synonym token boost: nodes whose synonyms share tokens with the question get +0.3
+3. Value seed boost (v3, if ValueScanner enabled):
+   col_score += match.score * 0.5; tbl_score += match.score * 0.3
+4. Top-M nodes selected as PPR seeds with personalisation vector ∝ cosine score
+5. nx.pagerank(subgraph, alpha=0.7, personalization=seeds, weight="weight")
+   — runs on per-DB subgraph only (isolated from other databases)
+6. FK bridge injection (v3): add missing FK-target tables when FK columns are in results
+7. Adaptive score-gap pruning (v3): cut tail where prev/curr score ratio > gap_ratio
+   gap_ratio = 4.5 (≥10 tables) | 3.0 (5-9 tables) | 2.0 (≤4 tables)
+8. Adaptive max_nodes cap: min(max_nodes, max(6, db_table_count))
+9. Return nodes with final score > threshold, sorted descending
 ```
 
 #### LLM Node Enrichment (`NodeEnricher`)
@@ -332,6 +341,8 @@ DPO is also supported as an ablation via `RLConfig.algorithm = "dpo"`.
 - `schema_graph.top_m`: `5` — PPR seed nodes per query
 - `schema_graph.alpha`: `0.7` — PPR damping factor
 - `schema_graph.max_hops`: `2` — PPR iteration depth
+- `schema_graph.score_gap_ratio`: `3.0` — **v3**: adaptive gap pruning threshold (auto-adjusted per DB size)
+- `schema_graph.use_fk_bridge`: `true` — **v3**: inject missing FK-target tables after PPR
 - `pre_retrieval.value_scan.enabled`: `false`
 - `pre_retrieval.decomposition.enabled`: `false`
 - `generation.mode`: `standard`
@@ -467,7 +478,7 @@ Default model (`paraphrase-multilingual-mpnet-base-v2`) matches `SchemaIndexer` 
 - `KGNode(node_id, node_type, db_id, table_name, column_name, dtype, is_pk, is_fk, sample_values, description, synonyms, embedding)` — enriched schema node
 - `KGEdge(src_id, dst_id, edge_type, weight, metadata)` — typed weighted edge
 - `NodeType`: DATABASE, TABLE, COLUMN
-- `EdgeType`: TABLE_CONTAINS, FK_REFERENCE, PK_COLUMN, SAME_TABLE, LEXICAL_SIMILAR, EMBEDDING_SIMILAR, SYNONYM_MATCH, CO_JOIN, CO_PREDICATE, CO_SELECT, VALUE_OVERLAP
+- `EdgeType`: DB_HAS_TABLE, TABLE_HAS_COLUMN, COLUMN_BELONGS_TO, PRIMARY_KEY_OF, FOREIGN_KEY, FOREIGN_KEY_REV, TABLE_FK, TABLE_FK_REV, INFERRED_FK, INFERRED_FK_REV, LEXICAL_SIMILAR, EMBEDDING_SIMILAR, SYNONYM_MATCH, CO_JOIN, CO_PREDICATE, CO_SELECT, VALUE_OVERLAP
 
 **Training objects**:
 - `CorrectionSample` + `CorrectionDataset` (`training/correction_formatter.py`) — correction training data serialisation and GRPO format conversion
@@ -482,3 +493,24 @@ Default model (`paraphrase-multilingual-mpnet-base-v2`) matches `SchemaIndexer` 
 | BIRD | 9.4K train / 1.5K dev | OmniSQL format |
 | SynSQL-2.5M | up to 200K subsample | Streaming via ijson |
 | EHRSQL, ScienceBenchmark, Spider-DK/Syn/Realistic | dev sets | Evaluation |
+
+
+<!-- ClaudeVibeCodeKit -->
+## ClaudeVibeCodeKit
+
+### Planning
+When planning complex tasks:
+1. Read `.claude/docs/plan-execution-guide.md` for format guide
+2. Use planning-agent for parallel execution optimization
+3. Output plan according to `.claude/schemas/plan-schema.json`
+
+### Available Commands
+- `/research <topic>` - Deep web research
+- `/meeting-notes <name>` - Live meeting notes
+- `/changelog` - Generate changelog
+- `/onboard` - Developer onboarding
+- `/handoff` - Create handoff document for conversation transition
+- `/continue` - Resume work from a handoff document
+- `/watzup` - Check current project status
+- `/social-media-post` - Social content workflow
+<!-- /ClaudeVibeCodeKit -->

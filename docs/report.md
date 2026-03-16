@@ -2,40 +2,47 @@
 
 **Date**: 2026-03-16
 **Benchmark**: BIRD Dev — all 11 databases, 1 534 examples
-**Graph version**: `bird_dev_enriched_v2.json` — LLM-enriched (gpt-4o-mini), all 3 edge layers,
-8-fix batch applied (real PPR scores · per-DB subgraph · adaptive max_nodes · score-gap pruning ·
-NL stopwords · FK bridge · hybrid_weight RRF · column score filtering)
+**Graph versions tested**:
+- `bird_dev_enriched_v2.json` — GraphRetriever v2 (8-fix batch)
+- `bird_dev_v3.json` — GraphRetriever v3 (TABLE_FK + INFERRED_FK + reduced CO_JOIN + FK bridge + adaptive gap)
+- `bird_dev_v3b.json` — GraphRetriever v3b (v3 + Layer 2b: EMBEDDING_SIMILAR + SYNONYM_MATCH edges)
+
 **Script**: `scripts/analyze_retrieval.py`
 **Result files**:
 
 | Retriever | JSON path |
 |---|---|
 | HybridRetriever | `results/bird_retrieval_analysis_full.json` |
-| GraphRetriever v2 | `results/bird_retrieval_analysis_graph_full.json` |
+| GraphRetriever v2 | `results/bird_retrieval_analysis_graph_v2_full.json` |
+| GraphRetriever v3 | `results/bird_retrieval_analysis_graph_v3_full.json` |
+| GraphRetriever v3b | `results/bird_retrieval_analysis_graph_full.json` |
 | Graph+Hybrid merge | `results/bird_retrieval_analysis_hybrid_merge_full.json` |
 
 ---
 
 ## 1. Executive Summary
 
-Three retrievers evaluated side-by-side on the full BIRD Dev set.
+Three retrievers evaluated side-by-side on the full BIRD Dev set, plus two v3 graph variants.
 All metrics are schema-linking only (no SQL generation).
 
 | Retriever | Tbl Recall | Tbl Prec | **Tbl F1** | Exact Match | Missed Ex | Noisy Ex | Avg Tokens |
 |---|---|---|---|---|---|---|---|
 | HybridRetriever *(baseline)* | **0.988** | 0.392 | 0.561 | 2.9% | 46 | 767 | 193 |
 | GraphRetriever v1 *(pre-8-fix)* | — | — | 0.672 | — | — | — | — |
-| **GraphRetriever v2** *(8-fix)* | 0.925 | **0.622** | **0.744** | **21.9%** | 251 | **260** | **77** |
-| **Graph+Hybrid merge** | 0.974 | 0.486 | 0.648 | 5.5% | 96 | 363 | 109 |
+| GraphRetriever v2 *(8-fix)* | 0.925 | **0.622** | **0.744** | **21.9%** | 251 | **260** | **77** |
+| **GraphRetriever v3** | 0.931 | 0.599 | 0.729 | 20.0% | 236 | 298 | 80 |
+| **GraphRetriever v3b** *(+Layer 2b)* | 0.932 | 0.590 | 0.723 | 20.1% | **230** | 323 | 77 |
+| Graph+Hybrid merge *(v2)* | 0.974 | 0.486 | 0.648 | 5.5% | 96 | 363 | 109 |
 
 **Key headline numbers:**
 
 - GraphRetriever v2 **F1 +18.3 pp** vs Hybrid (0.744 vs 0.561), driven by +23 pp precision.
-- GraphRetriever v2 vs v1: **F1 +7.2 pp** (0.744 vs 0.672). All 8 fixes contributed.
-- Column precision: Hybrid 10.5%, **Graph v2 14.1%** (+3.6 pp) — column score filtering at work.
+- **v3 improves recall** (+0.6 pp over v2) but **loses precision** (−2.3 pp) due to FK bridge injection.
+- **v3b (with Layer 2b edges) improves recall further** (+0.8 pp over v2, 21 fewer missed examples) but synonym edge density (42K edges) dilutes precision further (−3.2 pp).
+- v3 targets (F1 ≥ 0.78, Recall ≥ 0.95) **not met** — recall-precision tradeoff requires more surgical edge tuning.
 - Context size: Graph v2 averages **77 tokens** vs Hybrid's 193 (2.5× smaller prompt).
 - Exact match (recall=1 AND precision=1): **Graph v2 21.9%** vs Hybrid 2.9%.
-- Zero-recall examples (complete miss): **0 for all three retrievers**.
+- Zero-recall examples (complete miss): **0 for all retrievers**.
 
 ---
 
@@ -341,22 +348,125 @@ synonyms.
 `CO_JOIN` edges make all community tables look co-relevant.
 *Fix*: Reduce `CO_JOIN` edge weight from 0.80 to 0.50, or disable Layer-3 for FK-ring schemas.
 
-### 9.3 Recommended Next Iteration
+### 9.3 v2 Recommended Next Iteration *(implemented in v3)*
 
-| Priority | Fix | Expected impact |
-|---|---|---|
-| **High** | Table-level PPR seeds for FK columns | +3–5 pp recall on formula_1, financial, european_football_2 |
-| **High** | Per-DB adaptive `score_gap_ratio` (ratio=5 for n_tables ≥ 10) | −50+ noisy examples on formula_1/codebase |
-| **Medium** | `alpha=0.65` + `max_hops=3` for chain-depth DBs | +2 pp recall on multi-hop schemas |
-| **Medium** | Layer-3 edge weight tuning (`CO_JOIN` 0.80→0.50) | Better precision on stat-dense DBs |
-| **Low** | Expanded synonym vocabulary (gpt-4o, 10 synonyms/node) | +1–2 pp recall on simple queries |
-
-**Target after next iteration**: GraphRetriever F1 ≥ 0.78, recall ≥ 0.95, precision ≥ 0.58,
-avg tokens ≤ 90.
+| Priority | Fix | Expected impact | v3 Status |
+|---|---|---|---|
+| **High** | Table-level PPR seeds for FK columns | +3–5 pp recall on formula_1, financial, european_football_2 | ✅ `TABLE_FK` / `TABLE_FK_REV` edges (w=0.85) |
+| **High** | Per-DB adaptive `score_gap_ratio` (ratio=5 for n_tables ≥ 10) | −50+ noisy examples on formula_1/codebase | ✅ Adaptive: 4.5 (≥10 tbl), 3.0 (5-9), 2.0 (≤4) |
+| **Medium** | `alpha=0.65` + `max_hops=3` for chain-depth DBs | +2 pp recall on multi-hop schemas | — Not implemented |
+| **Medium** | Layer-3 edge weight tuning (`CO_JOIN` 0.80→0.50) | Better precision on stat-dense DBs | ✅ `CO_JOIN` capped at 0.50 |
+| **Low** | Expanded synonym vocabulary (gpt-4o, 10 synonyms/node) | +1–2 pp recall on simple queries | — Not implemented |
 
 ---
 
-## 10. Historical Progression
+## 10. GraphRetriever v3 Evaluation
+
+### 10.1 v3 Changes
+
+Graph structure changes (offline — `build_schema_graph.py`):
+- **`TABLE_FK` / `TABLE_FK_REV`** (w=0.85): Table-level FK shortcut edges. PPR can now hop between FK-related tables in 1 step (was 4-hop: Table→Col→Col→Table).
+- **`INFERRED_FK` / `INFERRED_FK_REV`** (w=0.95): Column-level FK edges inferred from VALUE_OVERLAP where Jaccard ≥ 0.5. Captures undeclared foreign keys.
+- **`CO_JOIN` weight cap**: Reduced from 0.80 → 0.50 to prevent statistical co-occurrence from overwhelming structural signals.
+
+Runtime retrieval changes (`graph_retriever.py`):
+- **Adaptive score-gap ratio**: `gap_ratio` adjusted per-DB: 4.5 for ≥10 tables (looser), 2.0 for ≤4 tables (tighter), 3.0 default.
+- **FK bridge injection**: After PPR, missing FK-target tables are injected when FK columns appear in results.
+- **Value seed boosting**: When `ValueScanner` is enabled, columns matching question values get boosted seed scores.
+
+### 10.2 v3 Results (without Layer 2b)
+
+Graph file: `bird_dev_v3.json` (6,981 edges)
+
+| Metric | v2 | **v3** | Δ |
+|---|---|---|---|
+| Table Recall | 0.925 | **0.931** | **+0.6 pp** |
+| Table Precision | **0.622** | 0.599 | −2.3 pp |
+| Table F1 | **0.744** | 0.729 | −1.5 pp |
+| Perfect recall % | 83.6% | **84.6%** | +1.0 pp |
+| Missed examples | 251 | **236** | **−15** |
+| Noisy examples | **260** | 298 | +38 |
+| FK pair recall | 0.880 | **0.891** | +1.1 pp |
+| Avg tokens | **77** | 80 | +3 |
+
+**Join-complexity breakdown (v2 → v3):**
+
+| Complexity | v2 Recall | v3 Recall | Δ | v2 F1 | v3 F1 | Δ |
+|---|---|---|---|---|---|---|
+| 1-table | 1.000 | 1.000 | +0.0 | **0.636** | 0.611 | −2.5 |
+| 2-table | 0.924 | **0.930** | +0.6 | **0.773** | 0.758 | −1.5 |
+| 3-table | 0.823 | **0.837** | **+1.3** | **0.759** | 0.754 | −0.5 |
+| 4+-table | 0.763 | **0.784** | **+2.2** | 0.700 | **0.727** | **+2.7** |
+
+**Key per-table miss changes (v2 → v3):**
+
+| Table | v2 misses | v3 misses | Δ |
+|---|---|---|---|
+| `formula_1.races` | 28 | **15** | **−13** ✅ |
+| `codebase_community.posthistory` | 7 | **2** | **−5** ✅ |
+| `thrombosis_prediction.patient` | 24 | 30 | +6 ❌ |
+
+**Verdict**: v3 successfully improved recall on multi-table queries (especially 3+ tables) and dramatically reduced `formula_1.races` misses (−13). However, FK bridge injection is too aggressive — adds whole tables, inflating noise and dropping precision. Net F1 is negative.
+
+### 10.3 v3b Results (v3 + Layer 2b edges)
+
+Graph file: `bird_dev_v3b.json` (53,685 edges: +4,348 EMBEDDING_SIMILAR + 42,356 SYNONYM_MATCH)
+
+| Metric | v2 | v3 | **v3b** | v3b vs v2 |
+|---|---|---|---|---|
+| Table Recall | 0.925 | 0.931 | **0.932** | **+0.8 pp** |
+| Table Precision | **0.622** | 0.599 | 0.590 | −3.2 pp |
+| Table F1 | **0.744** | 0.729 | 0.723 | −2.1 pp |
+| Perfect recall % | 83.6% | 84.6% | **85.0%** | **+1.4 pp** |
+| Missed examples | 251 | 236 | **230** | **−21** |
+| Noisy examples | **260** | 298 | 323 | +63 |
+| MRR | **0.944** | 0.935 | 0.915 | −2.9 pp |
+| FK pair recall | 0.880 | 0.891 | **0.891** | +1.1 pp |
+| Avg tokens | 77 | 80 | **77** | +0.7 |
+
+**Key per-table miss changes (v2 → v3b):**
+
+| Table | v2 | v3 | v3b | Δ(v3b-v2) |
+|---|---|---|---|---|
+| `formula_1.races` | 28 | 15 | **20** | **−8** ✅ |
+| `thrombosis_prediction.patient` | 24 | 30 | **18** | **−6** ✅ |
+| `financial.account` | 23 | 23 | **17** | **−6** ✅ |
+| `thrombosis_prediction.examination` | 6 | 9 | **4** | **−2** ✅ |
+| `student_club.member` | 12 | 11 | **9** | **−3** ✅ |
+| `codebase_community.users` | 5 | 5 | 11 | +6 ❌ |
+| `formula_1.drivers` | 10 | 13 | 14 | +4 ❌ |
+
+**Per-DB recall changes (v2 → v3b):**
+
+| Database | v2 Recall | v3b Recall | Δ |
+|---|---|---|---|
+| thrombosis_prediction | 0.917 | **0.939** | **+2.2 pp** ✅ |
+| student_club | 0.930 | **0.960** | **+3.0 pp** ✅ |
+| california_schools | 0.876 | **0.899** | **+2.3 pp** ✅ |
+| financial | 0.843 | **0.852** | **+0.9 pp** ✅ |
+| toxicology | 0.987 | **0.998** | **+1.0 pp** ✅ |
+| codebase_community | **0.969** | 0.957 | −1.2 pp ❌ |
+| european_football_2 | **0.879** | 0.863 | −1.6 pp ❌ |
+
+**Verdict**: Layer 2b edges help recall on domain-specific schemas (clinical, financial) where synonym/embedding similarity bridges lexical gaps. But the 42K SYNONYM_MATCH edges are too dense — they spread PPR mass everywhere, causing MRR to drop (−2.9 pp) and introducing 63 more noisy examples. The EMBEDDING_SIMILAR edges (4,348) are more surgical but get drowned out.
+
+### 10.4 v3 Diagnosis: Recall-Precision Tradeoff
+
+The fundamental tension in v3: **every new edge or bridge table improves recall but dilutes PPR mass and hurts precision**. The v3 targets (F1 ≥ 0.78, Recall ≥ 0.95, Precision ≥ 0.58) require a more surgical approach:
+
+| Issue | Observation | Potential fix |
+|---|---|---|
+| FK bridge too aggressive | Injects whole tables (all columns), adding noise | Only inject when ≥2 FK columns point to bridge table |
+| SYNONYM_MATCH too dense | 42K edges vs 4K EMBEDDING_SIMILAR | Raise `synonym_min_overlap` from 1→3, or reduce `W_SYNONYM_MAX` 0.85→0.50 |
+| CO_JOIN still noisy | `codebase_community` tables indistinguishable | Further reduce CO_JOIN to 0.30 or disable for star-topology DBs |
+| EMBEDDING_SIMILAR threshold | 0.75 may be too loose for cross-table pairs | Raise to 0.80 for cross-table, keep 0.75 for same-table |
+| PPR damping | `alpha=0.7` limits reach to 2-3 hops | Try `alpha=0.65` for deep FK chains (european_football_2) |
+
+**Next-iteration strategy**: Rather than adding more edges, focus on **edge weight tuning** and **selective pruning** to shift the precision-recall curve right.
+
+---
+
+## 11. Historical Progression
 
 | Milestone | Date | Retriever | F1 | Precision | Recall | Avg Tokens | Notes |
 |---|---|---|---|---|---|---|---|
@@ -364,6 +474,8 @@ avg tokens ≤ 90.
 | Graph structural only | 2025-07 | GraphRetriever v0 | 0.763 | 0.694 | 0.848 | — | Layer 1+2a, raw names, 100 ex |
 | Graph LLM-enriched | 2025-07 | GraphRetriever v1 | 0.672 | 0.522 | 0.945 | ~120 | All 3 layers, 1 534 ex, pre-fix |
 | **Graph v2 — 8-fix batch** | **2026-03** | **GraphRetriever v2** | **0.744** | **0.622** | **0.925** | **77** | **All 8 fixes, 1 534 ex** |
+| Graph v3 — structural+runtime | 2026-03 | GraphRetriever v3 | 0.729 | 0.599 | 0.931 | 80 | TABLE_FK, INFERRED_FK, CO_JOIN↓, FK bridge, adaptive gap |
+| Graph v3b — +Layer 2b edges | 2026-03 | GraphRetriever v3b | 0.723 | 0.590 | 0.932 | 77 | +4.3K EMBEDDING_SIMILAR, +42K SYNONYM_MATCH |
 
 ---
 
