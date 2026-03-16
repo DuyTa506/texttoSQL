@@ -407,7 +407,7 @@ def main():
 
     if use_graph:
         from src.schema_graph import SchemaGraph
-        from src.schema_graph.graph_retriever import GraphRetriever
+        from src.retrieval.graph_retriever import GraphRetriever
         from src.embeddings import OpenAIEmbeddingModel
         logger.info("Loading schema graph from: %s", args.graph_path)
         graph    = SchemaGraph.load(args.graph_path)

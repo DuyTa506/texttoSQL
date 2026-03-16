@@ -201,7 +201,7 @@ def _build_retriever(
     try:
         from sentence_transformers import SentenceTransformer
         from src.schema_graph import SchemaGraph
-        from src.schema_graph.graph_retriever import GraphRetriever
+        from src.retrieval.graph_retriever import GraphRetriever
     except ImportError as exc:
         logger.warning(
             "GraphRetriever dependencies not available (%s) — "

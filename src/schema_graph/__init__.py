@@ -18,6 +18,10 @@ Public API:
       build_statistical_edges,
       NodeEnricher,
   )
+
+Note: GraphRetriever lives in src.retrieval.graph_retriever — it is the
+Phase 2 schema-linking component that *uses* the graph, not part of the
+graph construction package itself.
 """
 
 from src.schema_graph.graph_types import EdgeType, KGEdge, KGNode, NodeType
@@ -30,7 +34,6 @@ from src.schema_graph.edge_builders.statistical_edges import (
     build_value_overlap_edges,
 )
 from src.schema_graph.node_enricher import NodeEnricher
-from src.schema_graph.graph_retriever import GraphRetriever
 
 __all__ = [
     # Core containers
@@ -47,8 +50,6 @@ __all__ = [
     "build_statistical_edges",
     "build_cooccurrence_edges",
     "build_value_overlap_edges",
-    # Enrichment + retrieval
+    # Enrichment
     "NodeEnricher",
-    "GraphRetriever",
 ]
-

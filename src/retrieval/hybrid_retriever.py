@@ -10,12 +10,13 @@ from rank_bm25 import BM25Okapi
 
 from ..schema.schema_chunker import SchemaChunk
 from ..schema.schema_indexer import SchemaIndexer
+from .base_retriever import BaseRetriever
 from .npmi_scorer import NPMIScorer
 
 logger = logging.getLogger(__name__)
 
 
-class HybridRetriever:
+class HybridRetriever(BaseRetriever):
     """BM25 + semantic search → RRF merge."""
 
     def __init__(
@@ -72,10 +73,13 @@ class HybridRetriever:
         query: str,
         *,
         db_id: str | None = None,
+        value_matches: list | None = None,  # accepted for interface compatibility; unused
     ) -> list[dict]:
         """Run hybrid retrieval and return merged results.
 
         Returns list of dicts: {id, content, chunk, score, source}.
+        ``value_matches`` is accepted for interface compatibility with
+        ``BaseRetriever`` but is not used by the BM25/semantic pipeline.
         """
         bm25_results = self._bm25_search(query, db_id=db_id)
         semantic_results = self._semantic_search(query, db_id=db_id)
@@ -176,6 +180,7 @@ class HybridRetriever:
         queries: list[str],
         *,
         db_id: str | None = None,
+        value_matches: list | None = None,  # accepted for interface compatibility; unused
     ) -> list[dict]:
         """Run hybrid retrieval for multiple queries and merge results via RRF.
 
