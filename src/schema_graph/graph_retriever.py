@@ -17,10 +17,12 @@ Architecture
   Question
     ↓  embed via SentenceTransformer (same model as SchemaGraph embeddings)
   Cosine entry-point scoring against all COLUMN + TABLE nodes
-    ↓  synonym boost (exact token match against node.synonyms)
+    ↓  synonym boost (exact token match against node.synonyms, NL stopwords removed)
   Top-M seed nodes
-    ↓  Personalized PageRank over graph edges (alpha=0.7, max_hops=2)
-  Final ranked node list
+    ↓  Personalized PageRank over per-DB subgraph (alpha=0.7, max_hops=2)
+  Real PPR scores preserved
+    ↓  FK bridge table injection (missing JOIN hubs added with bridge score)
+    ↓  Score gap pruning (elbow cut removes low-confidence tail)
     ↓  Convert KGNode → chunk-format dict (with CREATE TABLE context)
   Output: list[dict]  compatible with SchemaFilter.filter_and_format()
 
@@ -55,10 +57,24 @@ from typing import Optional
 
 import numpy as np
 
-from src.schema_graph.graph_types import KGNode, NodeType
+from src.schema_graph.graph_types import EdgeType, KGNode, NodeType
 from src.schema_graph.edge_builders.structural_edges import tokenize_name
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: NL stopword set for synonym token extraction
+# ---------------------------------------------------------------------------
+
+_NL_STOPWORDS: frozenset[str] = frozenset({
+    "what", "which", "who", "where", "when", "how", "why",
+    "the", "are", "is", "was", "were", "has", "have", "had",
+    "for", "and", "not", "but", "that", "this", "with", "from",
+    "all", "any", "can", "list", "give", "show", "find", "get",
+    "its", "into", "been", "will", "than", "you", "they", "their",
+    "each", "also", "use", "per", "out", "more", "most",
+})
 
 
 class GraphRetriever:
@@ -81,7 +97,7 @@ class GraphRetriever:
     score_threshold:
         Nodes with PPR score below this are excluded.
     max_nodes:
-        Hard cap on nodes returned per query.
+        Hard cap on nodes returned per query (adaptive per DB size by default).
     synonym_boost:
         Extra score added to nodes whose synonyms share tokens with the query.
     hybrid_retriever:
@@ -89,7 +105,16 @@ class GraphRetriever:
         merged with PPR results via RRF before returning.
     hybrid_weight:
         RRF weight applied to graph-PPR scores vs. hybrid scores.
+        Values > 1.0 amplify graph results in the fused ranking.
         1.0 = equal weight (standard RRF).
+    rrf_k:
+        RRF smoothing constant (default 60).
+    score_gap_ratio:
+        Elbow-cut threshold: if consecutive PPR scores have ratio > this value,
+        nodes below the gap are pruned.  Set to ``inf`` to disable.
+    use_fk_bridge:
+        If True, inject FK-connected bridge tables missing from the PPR result
+        to improve recall on multi-join queries.
     """
 
     def __init__(
@@ -106,6 +131,8 @@ class GraphRetriever:
         hybrid_retriever=None,      # HybridRetriever | None
         hybrid_weight: float = 1.0,
         rrf_k: int = 60,
+        score_gap_ratio: float = 3.0,
+        use_fk_bridge: bool = True,
     ) -> None:
         self.graph = graph
         self.embedder = embedder
@@ -118,6 +145,8 @@ class GraphRetriever:
         self.hybrid_retriever = hybrid_retriever
         self.hybrid_weight = hybrid_weight
         self.rrf_k = rrf_k
+        self.score_gap_ratio = score_gap_ratio
+        self.use_fk_bridge = use_fk_bridge
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -139,25 +168,43 @@ class GraphRetriever:
         """
         # Embed the query
         q_emb = self._embed(query)
-        synonym_tokens = _extract_synonym_tokens(query)
+        synonym_tokens = _extract_synonym_tokens(query)  # Fix 4: stopwords filtered
 
-        # PPR retrieval from graph
-        ppr_nodes = self.graph.retrieve(
+        # Fix 2: Adaptive max_nodes — cap based on DB table count so small DBs
+        # don't return 20 nodes when they only have 5 tables.
+        adaptive_max = self._adaptive_max_nodes(db_id)
+
+        # PPR retrieval from graph — now returns list[tuple[KGNode, float]] (Fix 1)
+        ppr_nodes_with_scores: list[tuple[KGNode, float]] = self.graph.retrieve(
             q_emb,
             db_id=db_id,
             top_m=self.top_m,
             alpha=self.alpha,
             max_iter=self.ppr_max_iter,
             score_threshold=self.score_threshold,
-            max_nodes=self.max_nodes,
+            max_nodes=adaptive_max,
             synonym_tokens=synonym_tokens,
             synonym_boost=self.synonym_boost,
         )
-        graph_results = self._nodes_to_dicts(ppr_nodes, db_id=db_id)
+
+        # Fix 6: FK bridge table injection — must run BEFORE gap pruning so
+        # bridge nodes with lower scores don't get pruned immediately.
+        if self.use_fk_bridge and db_id is not None:
+            ppr_nodes_with_scores = self._add_fk_bridge_tables(
+                ppr_nodes_with_scores, db_id
+            )
+
+        # Fix 3: Score gap pruning — remove low-confidence tail nodes.
+        ppr_nodes_with_scores = self._apply_score_gap_pruning(ppr_nodes_with_scores)
+
+        # Fix 1: Pass real scores to _nodes_to_dicts
+        graph_results = self._nodes_to_dicts(ppr_nodes_with_scores, db_id=db_id)
 
         # Hybrid merge if a secondary retriever is provided
         if self.hybrid_retriever is not None:
             hybrid_results = self.hybrid_retriever.retrieve(query, db_id=db_id)
+            # Fix 8: _rrf_merge now distinguishes graph vs. other lists and applies
+            # self.hybrid_weight to graph results.
             return self._rrf_merge(graph_results, hybrid_results)
 
         return graph_results
@@ -194,7 +241,10 @@ class GraphRetriever:
         per_query: list[list[dict]] = [
             self.retrieve(q, db_id=db_id) for q in queries
         ]
-        merged = self._rrf_merge(*per_query)
+        # Fix 8: For multi-query fusion all lists are equal-weight (no graph vs.
+        # hybrid distinction), so use the first list as "graph" and the rest as
+        # "others" — all receive equal RRF weight (hybrid_weight=1.0 effective).
+        merged = self._rrf_merge(per_query[0], *per_query[1:])
 
         # Deduplicate by node_id
         seen: set[str] = set()
@@ -209,12 +259,12 @@ class GraphRetriever:
 
     def _nodes_to_dicts(
         self,
-        nodes: list[KGNode],
+        nodes_with_scores: list[tuple[KGNode, float]],  # Fix 1: accept tuples
         db_id: Optional[str] = None,
     ) -> list[dict]:
         """
-        Convert a list of KGNodes to the chunk-format dicts expected by
-        ``SchemaFilter.filter_and_format()``.
+        Convert a list of (KGNode, score) tuples to the chunk-format dicts
+        expected by ``SchemaFilter.filter_and_format()``.
 
         The ``content`` field is constructed from node data so that
         SchemaFilter can still parse it (it inspects chunk metadata via
@@ -224,7 +274,8 @@ class GraphRetriever:
         object via ``_SyntheticChunk`` so SchemaFilter doesn't break.
         """
         results: list[dict] = []
-        for i, node in enumerate(nodes):
+        # Fix 1: Use real PPR score instead of 1/(i+1) rank-based scoring
+        for node, score in nodes_with_scores:
             content = _node_to_content(node)
             synthetic_chunk = _SyntheticChunk(
                 db_id=node.db_id,
@@ -237,21 +288,47 @@ class GraphRetriever:
                 "id": node.node_id,
                 "content": content,
                 "chunk": synthetic_chunk,
-                "score": 1.0 / (i + 1),     # rank-based score (PPR already sorted)
+                "score": score,          # Fix 1: real PPR score
                 "source": "graph_ppr",
-                "node": node,                # extra: downstream code can inspect
+                "node": node,            # extra: downstream code can inspect
             })
         return results
 
     # ── RRF merge ─────────────────────────────────────────────────────────────
 
-    def _rrf_merge(self, *result_lists: list[dict]) -> list[dict]:
-        """Standard Reciprocal Rank Fusion over multiple result lists."""
+    def _rrf_merge(
+        self,
+        graph_results: list[dict],
+        *other_lists: list[dict],
+    ) -> list[dict]:
+        """
+        Reciprocal Rank Fusion over multiple result lists.
+
+        Fix 8: ``graph_results`` is weighted by ``self.hybrid_weight`` in the
+        RRF accumulator so the graph signal can be up- or down-weighted relative
+        to the hybrid retriever's results (all ``other_lists`` use weight 1.0).
+
+        Parameters
+        ----------
+        graph_results:
+            PPR results from this retriever (weighted by ``hybrid_weight``).
+        *other_lists:
+            Additional result lists (e.g. HybridRetriever output), each with
+            equal weight 1.0 in the fusion.
+        """
         k = self.rrf_k
         rrf_scores: dict[str, float] = defaultdict(float)
         best_item: dict[str, dict] = {}
 
-        for results in result_lists:
+        # Graph results — weighted by hybrid_weight (Fix 8)
+        for rank, item in enumerate(graph_results, start=1):
+            rid = item["id"]
+            rrf_scores[rid] += self.hybrid_weight / (k + rank)
+            if rid not in best_item:
+                best_item[rid] = item
+
+        # Other result lists — standard RRF weight 1.0
+        for results in other_lists:
             for rank, item in enumerate(results, start=1):
                 rid = item["id"]
                 rrf_scores[rid] += 1.0 / (k + rank)
@@ -266,6 +343,149 @@ class GraphRetriever:
             entry["source"] = "rrf"
             merged.append(entry)
         return merged
+
+    # ── Fix 2: Adaptive max_nodes ──────────────────────────────────────────────
+
+    def _adaptive_max_nodes(self, db_id: Optional[str]) -> int:
+        """
+        Compute an adaptive hard cap on returned nodes based on DB size.
+
+        Small databases (e.g. 5 tables) should not return 20 nodes — that
+        floods the prompt with irrelevant columns and collapses precision.
+        The cap is ``min(max_nodes, max(6, db_table_count))``, ensuring we
+        always return at least 6 nodes even for the smallest schemas.
+
+        For multi-DB or unknown db_id, fall back to the configured max_nodes.
+        """
+        if db_id is None:
+            return self.max_nodes
+        db_table_count = sum(
+            1 for n in self.graph.nodes_for_db(db_id)
+            if n.node_type == NodeType.TABLE
+        )
+        if db_table_count == 0:
+            return self.max_nodes
+        return min(self.max_nodes, max(6, db_table_count))
+
+    # ── Fix 6: FK bridge table recall boost ───────────────────────────────────
+
+    def _add_fk_bridge_tables(
+        self,
+        nodes_with_scores: list[tuple[KGNode, float]],
+        db_id: str,
+    ) -> list[tuple[KGNode, float]]:
+        """
+        Inject FK-connected bridge tables that are missing from the PPR result.
+
+        Analysis showed 130/192 Graph recall failures are due to JOIN hub tables
+        (e.g. ``races``, ``member``, ``patient``) that PPR misses because it
+        finds FK columns on both sides of a JOIN but not the intermediary table.
+
+        For every FK column in the result, this method checks whether the
+        FK-target table is already retrieved.  If not, the table node and its
+        columns are added with a bridge score derived from the minimum result score.
+
+        Parameters
+        ----------
+        nodes_with_scores:
+            Current PPR result list (sorted by score desc).
+        db_id:
+            The database being queried (only same-DB bridges are added).
+
+        Returns
+        -------
+        list[tuple[KGNode, float]]
+            Extended list with bridge tables appended.
+        """
+        all_nodes = self.graph.nodes
+        fk_edge_types = {EdgeType.FOREIGN_KEY, EdgeType.FOREIGN_KEY_REV}
+
+        retrieved_tables: set[str] = {
+            n.table_name for n, _ in nodes_with_scores
+            if n.node_type == NodeType.TABLE
+        }
+        # Also count tables that have at least one column in the result
+        for n, _ in nodes_with_scores:
+            if n.node_type == NodeType.COLUMN:
+                retrieved_tables.add(n.table_name)
+
+        min_score = min((s for _, s in nodes_with_scores), default=0.0)
+        bridge_score = min_score * 0.5
+
+        bridges: dict[str, KGNode] = {}
+        for node, _ in nodes_with_scores:
+            if node.node_type != NodeType.COLUMN or not node.is_fk:
+                continue
+            for edge in self.graph.neighbors(node.node_id, edge_types=fk_edge_types):
+                dst = all_nodes.get(edge.dst_id)
+                if dst is None or dst.db_id != db_id:
+                    continue
+                target_table = dst.table_name
+                if target_table not in retrieved_tables and target_table not in bridges:
+                    table_nid = f"{db_id}.{target_table}"
+                    tbl_node = all_nodes.get(table_nid)
+                    if tbl_node is not None:
+                        bridges[target_table] = tbl_node
+
+        if not bridges:
+            return nodes_with_scores
+
+        result = list(nodes_with_scores)
+        col_bridge_score = bridge_score * 0.8
+        for tbl_node in bridges.values():
+            result.append((tbl_node, bridge_score))
+            for col_node in self.graph.column_nodes_for_table(db_id, tbl_node.table_name):
+                result.append((col_node, col_bridge_score))
+
+        logger.debug(
+            "FK bridge: added %d bridge table(s) for db_id=%s: %s",
+            len(bridges),
+            db_id,
+            list(bridges.keys()),
+        )
+        return result
+
+    # ── Fix 3: Score gap pruning ───────────────────────────────────────────────
+
+    def _apply_score_gap_pruning(
+        self,
+        nodes_with_scores: list[tuple[KGNode, float]],
+        min_keep: int = 2,
+    ) -> list[tuple[KGNode, float]]:
+        """
+        Remove low-confidence tail nodes via an elbow-cut heuristic.
+
+        If two consecutive nodes have a score ratio (prev/curr) exceeding
+        ``score_gap_ratio``, all nodes from the lower one onward are pruned.
+        At least ``min_keep`` nodes are always retained.
+
+        Example: scores [0.15, 0.14, 0.12, 0.06] with gap_ratio=3.0
+          → 0.12 / 0.06 = 2.0  (no gap)
+          → 0.15 / 0.14 = 1.07 (no gap)
+          → all kept  (ratio never exceeds 3.0)
+
+        Example: scores [0.30, 0.05, 0.04] with gap_ratio=3.0
+          → 0.30 / 0.05 = 6.0  (gap!)  → prune from index 1 onward
+          → keeps only [0.30]  (capped at min_keep=2: keeps [0.30, 0.05])
+        """
+        gap_ratio = self.score_gap_ratio
+        if gap_ratio <= 0 or len(nodes_with_scores) <= min_keep:
+            return nodes_with_scores
+
+        pruned = [nodes_with_scores[0]]
+        for i in range(1, len(nodes_with_scores)):
+            prev_score = nodes_with_scores[i - 1][1]
+            curr_score = nodes_with_scores[i][1]
+            if prev_score > 0 and (prev_score / max(curr_score, 1e-9)) > gap_ratio:
+                # Gap found — stop here, but ensure min_keep is satisfied
+                if len(pruned) < min_keep:
+                    pruned.extend(
+                        nodes_with_scores[len(pruned):min_keep]
+                    )
+                break
+            pruned.append(nodes_with_scores[i])
+
+        return pruned
 
     # ── Embedding ─────────────────────────────────────────────────────────────
 
@@ -353,10 +573,13 @@ def _node_to_content(node: KGNode) -> str:
 def _extract_synonym_tokens(query: str) -> set[str]:
     """
     Extract lowercase tokens from the query for synonym matching.
-    Filters out very short tokens and punctuation.
+
+    Fix 4: Filters out NL stopwords (articles, auxiliaries, question words)
+    to reduce spurious synonym boosts from generic English words like "what",
+    "the", "are" that appear in many queries but carry no schema signal.
     """
-    tokens = set()
+    tokens: set[str] = set()
     for tok in re.split(r"\W+", query.lower()):
-        if len(tok) >= 3:
+        if len(tok) >= 3 and tok not in _NL_STOPWORDS:
             tokens.add(tok)
     return tokens

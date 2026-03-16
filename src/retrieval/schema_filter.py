@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..data.base_adapter import Database
-from ..data.schema_chunker import SchemaChunk
+from ..schema.models import Database
+from ..schema.schema_chunker import SchemaChunk
 
 
 class SchemaFilter:
@@ -69,9 +69,44 @@ class SchemaFilter:
             # Get table object for column details
             table_obj = db.get_table(table_name)
             if table_obj:
+                # Fix 7: Collect per-column scores from retrieved chunks.
+                # GraphRetriever emits individual column nodes as scored dicts;
+                # if any column scores are present for this table, show only
+                # scored columns + PK/FK columns (precision improvement).
+                # HybridRetriever path has no column-level scores → show all
+                # columns unchanged (fully backward-compatible).
+                col_scores: dict[str, float] = {}
+                for item in sorted_chunks:
+                    c = item.get("chunk")
+                    if (
+                        c is not None
+                        and getattr(c, "table_name", None) == table_name
+                        and getattr(c, "chunk_type", None) == "column"
+                        and getattr(c, "column_name", None)
+                    ):
+                        col_scores[c.column_name] = item.get("score", 0.0)
+
+                # FK columns of this table (always include regardless of score)
+                fk_cols: set[str] = set()
+                for fk in db.foreign_keys:
+                    if fk.from_table == table_name:
+                        fk_cols.add(fk.from_column)
+                    if fk.to_table == table_name:
+                        fk_cols.add(fk.to_column)
+
+                if col_scores:
+                    # GraphRetriever path: only show scored columns + PK + FK
+                    cols_to_show = [
+                        c for c in table_obj.columns
+                        if c.name in col_scores or c.primary_key or c.name in fk_cols
+                    ]
+                else:
+                    # HybridRetriever path: show all columns (unchanged behaviour)
+                    cols_to_show = table_obj.columns
+
                 cols_str = ", ".join(
                     f"{c.name} ({c.dtype})" + (" [PK]" if c.primary_key else "")
-                    for c in table_obj.columns
+                    for c in cols_to_show
                 )
                 lines.append(f"CREATE TABLE {table_name} ({cols_str})")
             else:

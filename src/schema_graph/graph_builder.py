@@ -64,7 +64,7 @@ from typing import Optional
 import networkx as nx
 import numpy as np
 
-from src.data.base_adapter import Database
+from src.schema.models import Database
 from src.schema_graph.edge_builders.structural_edges import build_structural_edges
 from src.schema_graph.graph_types import (
     STATISTICAL_EDGE_TYPES,
@@ -291,7 +291,7 @@ class SchemaGraph:
         max_nodes: int = 20,
         synonym_tokens: Optional[set[str]] = None,
         synonym_boost: float = 0.3,
-    ) -> list[KGNode]:
+    ) -> list[tuple[KGNode, float]]:
         """
         Retrieve a relevant schema subgraph for the given query embedding via
         Personalized PageRank (PPR) using ``nx.pagerank``.
@@ -315,8 +315,8 @@ class SchemaGraph:
             Dense query vector (same dimension as node embeddings).
         db_id:
             If provided, restrict retrieval to nodes from this database.
-            PPR still runs on the full graph but only nodes belonging to
-            *db_id* are returned (cross-DB edges are not used for retrieval).
+            PPR runs on a per-DB subgraph view (O(1) copy) to prevent
+            probability-mass leakage across databases.
         top_m:
             Number of highest-similarity nodes used as PPR seeds.
         alpha:
@@ -337,8 +337,8 @@ class SchemaGraph:
 
         Returns
         -------
-        list[KGNode]
-            Relevant schema nodes, sorted by PPR score descending.
+        list[tuple[KGNode, float]]
+            Pairs of (schema node, PPR score), sorted by score descending.
         """
         # ── Candidate nodes: ChromaDB ANN (fast) or linear scan (fallback) ──────
         if self._chroma_collection is not None:
@@ -386,7 +386,7 @@ class SchemaGraph:
                 and attrs["data"].node_type in (NodeType.COLUMN, NodeType.TABLE)
                 and (db_id is None or attrs["data"].db_id == db_id)
             ]
-            return fallback[:max_nodes]
+            return [(n, 0.0) for n in fallback[:max_nodes]]
 
         # ── Step 3: Seed nodes → personalization dict ─────────────────────────
         sorted_seeds = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -399,9 +399,21 @@ class SchemaGraph:
         personalization = {nid: s / total for nid, s in raw_seed_scores.items()}
 
         # ── Step 4: Personalized PageRank via NetworkX ────────────────────────
+        # Fix 5: Run PPR on a per-DB subgraph view to prevent probability-mass
+        # leakage into other databases' nodes.  G.subgraph() returns a live view
+        # (no data copy, O(1) construction).
+        if db_id is not None:
+            db_node_ids = [
+                nid for nid, attrs in self.G.nodes(data=True)
+                if "data" in attrs and attrs["data"].db_id == db_id
+            ]
+            run_graph = self.G.subgraph(db_node_ids)
+        else:
+            run_graph = self.G
+
         try:
             ppr_scores: dict[str, float] = nx.pagerank(
-                self.G,
+                run_graph,
                 alpha=alpha,
                 personalization=personalization,
                 max_iter=max_iter,
@@ -428,7 +440,9 @@ class SchemaGraph:
         result_ids.sort(key=lambda nid: ppr_scores[nid], reverse=True)
         result_ids = result_ids[:max_nodes]
 
-        return [all_nodes[nid] for nid in result_ids]
+        # Fix 1: Return real PPR scores as (KGNode, score) tuples instead of
+        # discarding them.  Callers use these scores for downstream RRF fusion.
+        return [(all_nodes[nid], ppr_scores[nid]) for nid in result_ids]
 
     # ── Entry-point scoring helpers ────────────────────────────────────────────
 
@@ -699,7 +713,7 @@ class SchemaGraph:
 class SchemaGraphBuilder:
     """
     Factory that builds a :class:`SchemaGraph` from one or more
-    :class:`~src.data.base_adapter.Database` objects.
+    :class:`~src.schema.models.Database` objects.
 
     By default only Layer-1 (structural) edges are added.
     Layer-2 and Layer-3 edges are added later by calling the dedicated
