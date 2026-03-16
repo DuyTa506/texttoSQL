@@ -46,7 +46,7 @@ import sqlite3
 from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import sqlparse
 from sqlparse.sql import Identifier, IdentifierList, Where
@@ -90,7 +90,7 @@ def build_statistical_edges(
     examples: list["Example"],
     *,
     db_dir: str = "",
-    db_id: Optional[str] = None,
+    db_id: str | None = None,
     join_threshold: float = DEFAULT_JOIN_THRESHOLD,
     predicate_threshold: float = DEFAULT_PREDICATE_THRESHOLD,
     select_threshold: float = DEFAULT_SELECT_THRESHOLD,
@@ -168,7 +168,7 @@ def build_cooccurrence_edges(
     graph: "SchemaGraph",
     examples: list["Example"],
     *,
-    db_id: Optional[str] = None,
+    db_id: str | None = None,
     join_threshold: float = DEFAULT_JOIN_THRESHOLD,
     predicate_threshold: float = DEFAULT_PREDICATE_THRESHOLD,
     select_threshold: float = DEFAULT_SELECT_THRESHOLD,
@@ -319,7 +319,7 @@ def build_value_overlap_edges(
     graph: "SchemaGraph",
     *,
     db_dir: str,
-    db_id: Optional[str] = None,
+    db_id: str | None = None,
     threshold: float = DEFAULT_VALUE_OVERLAP_THRESHOLD,
     max_distinct_values: int = DEFAULT_MAX_DISTINCT_VALUES,
 ) -> list[KGEdge]:
@@ -530,7 +530,7 @@ def _parse_sql(
     select_part = sql_lower[:select_end] if select_end else ""
     where_part = sql_lower[where_start:] if where_start else ""
 
-    def _resolve(tbl_token: str, col_token: str) -> Optional[str]:
+    def _resolve(tbl_token: str, col_token: str) -> str | None:
         real_tbl = alias_map.get(tbl_token, tbl_token)
         key = f"{real_tbl}.{col_token}"
         if key in db_schema:
@@ -575,7 +575,7 @@ def _extract_tables(sql_lower: str) -> set[str]:
     return tables
 
 
-def _find_keyword_pos(sql: str, keywords: list[str]) -> Optional[int]:
+def _find_keyword_pos(sql: str, keywords: list[str]) -> int | None:
     """Return the position of the first occurrence of any keyword (word-boundary)."""
     for kw in keywords:
         m = re.search(rf"\b{kw}\b", sql, re.IGNORECASE)
@@ -610,7 +610,7 @@ def _build_schema_lookup(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_db_path(db_dir: str, db_id: str) -> Optional[Path]:
+def _resolve_db_path(db_dir: str, db_id: str) -> Path | None:
     """
     Resolve ``{db_dir}/{db_id}/{db_id}.sqlite``.
     Falls back to ``{db_dir}/{db_id}.sqlite`` (flat layout).

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__my-answer-engine__ask_internet",
+      "Bash(git add:*)",
+      "Bash(uv run python -m pytest:*)",
+      "Bash(uv sync:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nrefactor\\(src\\): Phase 1 quick wins — standardize type hints, extract constants, improve abstractions\n\nCosmetic refactoring for code maintainability across src/ \\(no behavior changes\\):\n\n1. **value_scanner.py** — Extract magic regex patterns & thresholds to module-level constants\n   \\(_MIN_QUOTED_LEN, _QUOTED_STRING_RE, _MIN_TOKEN_LEN, _STOP_WORDS, etc.\\)\n   + Replace manual conn.close\\(\\) with context manager \\(with sqlite3.connect\\)\n\n2. **question_decomposer.py** — Extract complexity scoring weights to class constants\n   \\(_LEN_DIVISOR, _LEN_MAX_CONTRIB, _KEYWORD_CONTRIB, _REL_PER_MATCH, etc.\\)\n\n3. **retry_loop.py** — Extract error message preview length \\(120\\) to _ERROR_MSG_PREVIEW_LEN constant\n\n4. **query_augmentor.py** — Add return type annotation: str | list[str] \\(was missing\\)\n   + Standardize function signatures with X | None pattern\n\n5. **node_enricher.py** — Swap direct SentenceTransformer import for BaseEmbeddingModel abstraction\n   + embed_nodes\\(\\) now accepts BaseEmbeddingModel | str \\(works with both HF & OpenAI\\)\n   + Removed hard-coded batch_size param; retrieved from model instance\n   + Drop SentenceTransformer import; use embeddings.huggingface.HuggingFaceEmbeddingModel fallback\n\n6. **All src/ files \\(28 files\\)** — Standardize Optional[X] → X | None \\(Python 3.10+ syntax\\)\n   + Remove stale `Optional` imports from typing module\n   + Also modernize List[X]→list[X], Dict→dict, Union→|, etc. where applicable\n\nTests: All 226 tests passing ✅\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

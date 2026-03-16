@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator
 
 from .base import BaseLLM
 
@@ -60,11 +60,11 @@ class OpenAILLM(BaseLLM):
     def __init__(
         self,
         model_name: str = "gpt-4o-mini",
-        api_key: Optional[str] = None,
-        organization: Optional[str] = None,
-        base_url: Optional[str] = None,
+        api_key: str | None = None,
+        organization: str | None = None,
+        base_url: str | None = None,
         default_temperature: float = 0.0,
-        default_max_tokens: Optional[int] = 512,
+        default_max_tokens: int | None = 512,
     ):
         try:
             from openai import AsyncOpenAI, OpenAI
@@ -106,9 +106,9 @@ class OpenAILLM(BaseLLM):
     def generate(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         temperature = temperature if temperature is not None else self.default_temperature
@@ -134,9 +134,9 @@ class OpenAILLM(BaseLLM):
     def stream(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> Iterator[str]:
         temperature = temperature if temperature is not None else self.default_temperature
@@ -166,9 +166,9 @@ class OpenAILLM(BaseLLM):
     async def agenerate(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         temperature = temperature if temperature is not None else self.default_temperature
@@ -192,9 +192,9 @@ class OpenAILLM(BaseLLM):
     async def astream(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> AsyncIterator[str]:
         temperature = temperature if temperature is not None else self.default_temperature
@@ -222,14 +222,14 @@ class OpenAILLM(BaseLLM):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _build_messages(
-        self, user_prompt: str, system_prompt: Optional[str]
+        self, user_prompt: str, system_prompt: str | None
     ) -> list[dict]:
         return [
             {"role": "system", "content": system_prompt or _SQL_SYSTEM_PROMPT},
             {"role": "user",   "content": user_prompt},
         ]
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         return {
             "provider": "openai",
             "model_name": self.model_name,

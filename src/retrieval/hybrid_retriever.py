@@ -6,8 +6,6 @@ retrieval, merged via Reciprocal Rank Fusion (RRF).
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
 from rank_bm25 import BM25Okapi
 
 from ..schema.schema_chunker import SchemaChunk
@@ -27,7 +25,7 @@ class HybridRetriever:
         bm25_top_k: int = 30,
         semantic_top_k: int = 30,
         rrf_k: int = 60,
-        npmi_scorer: Optional[NPMIScorer] = None,
+        npmi_scorer: NPMIScorer | None = None,
         npmi_top_k: int = 30,
     ):
         """
@@ -73,7 +71,7 @@ class HybridRetriever:
         self,
         query: str,
         *,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
     ) -> list[dict]:
         """Run hybrid retrieval and return merged results.
 
@@ -95,7 +93,7 @@ class HybridRetriever:
     # ---- BM25 ---------------------------------------------------------------
 
     def _bm25_search(
-        self, query: str, *, db_id: Optional[str] = None
+        self, query: str, *, db_id: str | None = None
     ) -> list[dict]:
         tokenized_query = query.lower().split()
         scores = self._bm25.get_scores(tokenized_query)
@@ -125,7 +123,7 @@ class HybridRetriever:
     # ---- Semantic -----------------------------------------------------------
 
     def _semantic_search(
-        self, query: str, *, db_id: Optional[str] = None
+        self, query: str, *, db_id: str | None = None
     ) -> list[dict]:
         raw = self.indexer.query(query, top_k=self.semantic_top_k, db_id=db_id)
         results = []
@@ -177,7 +175,7 @@ class HybridRetriever:
         self,
         queries: list[str],
         *,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
     ) -> list[dict]:
         """Run hybrid retrieval for multiple queries and merge results via RRF.
 
@@ -225,7 +223,7 @@ class HybridRetriever:
     # ---- NPMI ---------------------------------------------------------------
 
     def _npmi_search(
-        self, query: str, *, db_id: Optional[str] = None
+        self, query: str, *, db_id: str | None = None
     ) -> list[dict]:
         """Score chunks using NPMI co-occurrence statistics."""
         # Filter chunks by db_id

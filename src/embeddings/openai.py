@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional, Union
+from typing import Union
 
 from .base import BaseEmbeddingModel
 
@@ -66,10 +66,10 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
     def __init__(
         self,
         model: str = _DEFAULT_MODEL,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
         batch_size: int = _DEFAULT_BATCH,
-        dimensions: Optional[int] = None,
+        dimensions: int | None = None,
     ):
         self.model = model
         self.batch_size = batch_size
@@ -115,7 +115,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
     # BaseEmbeddingModel interface
     # ------------------------------------------------------------------
 
-    def embed(self, texts: Union[str, List[str]]) -> List[List[float]]:
+    def embed(self, texts: str | list[str]) -> list[list[float]]:
         """
         Embed one or more texts via the OpenAI Embeddings API.
 
@@ -132,7 +132,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         if isinstance(texts, str):
             texts = [texts]
 
-        all_vectors: List[List[float]] = []
+        all_vectors: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
 

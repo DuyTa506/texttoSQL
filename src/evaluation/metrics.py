@@ -12,8 +12,6 @@ import logging
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional
-
 import sqlparse
 
 logger = logging.getLogger(__name__)

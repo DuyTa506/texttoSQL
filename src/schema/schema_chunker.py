@@ -11,8 +11,6 @@ Chunk types (following RASL paper):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
-
 from .models import Database
 
 

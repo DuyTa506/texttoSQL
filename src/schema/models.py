@@ -8,8 +8,6 @@ Defines the core dataclasses shared across the entire project:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 # =============================================================================
 # Standard Data Models
@@ -47,11 +45,11 @@ class Database:
     tables: list[Table] = field(default_factory=list)
     foreign_keys: list[ForeignKey] = field(default_factory=list)
     sample_values: dict[str, list[str]] = field(default_factory=dict)
-    db_path: Optional[str] = None  # path to SQLite file if available
+    db_path: str | None = None  # path to SQLite file if available
 
     # ---- convenience helpers ------------------------------------------------
 
-    def get_table(self, name: str) -> Optional[Table]:
+    def get_table(self, name: str) -> Table | None:
         """Return table by name (case-insensitive)."""
         name_low = name.lower()
         for t in self.tables:

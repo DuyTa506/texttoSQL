@@ -29,8 +29,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Optional
-
 logger = logging.getLogger(__name__)
 
 # ── System prompt fragments for each generation mode ─────────────────────────
@@ -140,8 +138,8 @@ class SQLInference:
         cls,
         model: str = "gpt-4o-mini",
         *,
-        api_key: Optional[str] = None,
-        api_base_url: Optional[str] = None,
+        api_key: str | None = None,
+        api_base_url: str | None = None,
         **kwargs,
     ) -> "SQLInference":
         """Convenience constructor for the OpenAI backend."""
@@ -307,8 +305,8 @@ class _OpenAIBackend:
     def __init__(
         self,
         model: str = "gpt-4o-mini",
-        api_key: Optional[str] = None,
-        api_base_url: Optional[str] = None,
+        api_key: str | None = None,
+        api_base_url: str | None = None,
         max_tokens: int = 512,
     ):
         self.model = model

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +163,7 @@ class KGNode:
         column_name: str,
         dtype: str = "",
         is_pk: bool = False,
-        sample_values: Optional[list[str]] = None,
+        sample_values: list[str] | None = None,
     ) -> "KGNode":
         return cls(
             node_id=f"{db_id}.{table_name}.{column_name}",

@@ -59,7 +59,6 @@ import json
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 import networkx as nx
 import numpy as np
@@ -196,7 +195,7 @@ class SchemaGraph:
         return [attrs["data"] for _, _, attrs in self.G.edges(data=True)
                 if "data" in attrs]
 
-    def get_node(self, node_id: str) -> Optional[KGNode]:
+    def get_node(self, node_id: str) -> KGNode | None:
         if node_id in self.G:
             return self.G.nodes[node_id].get("data")
         return None
@@ -204,7 +203,7 @@ class SchemaGraph:
     def neighbors(
         self,
         node_id: str,
-        edge_types: Optional[set[EdgeType]] = None,
+        edge_types: set[EdgeType] | None = None,
     ) -> list[KGEdge]:
         """Return outgoing KGEdges from *node_id*, optionally filtered by type."""
         if node_id not in self.G:
@@ -283,15 +282,15 @@ class SchemaGraph:
         self,
         query_embedding: np.ndarray,
         *,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
         top_m: int = 5,
         alpha: float = 0.7,
         max_iter: int = 100,
         score_threshold: float = 0.05,
         max_nodes: int = 20,
-        synonym_tokens: Optional[set[str]] = None,
+        synonym_tokens: set[str] | None = None,
         synonym_boost: float = 0.3,
-        value_matched_nodes: Optional[dict[str, float]] = None,
+        value_matched_nodes: dict[str, float] | None = None,
     ) -> list[tuple[KGNode, float]]:
         """
         Retrieve a relevant schema subgraph for the given query embedding via
@@ -464,7 +463,7 @@ class SchemaGraph:
         self,
         query_embedding: np.ndarray,
         *,
-        db_id: Optional[str],
+        db_id: str | None,
         top_m: int,
         synonym_tokens: set,
         synonym_boost: float,
@@ -522,7 +521,7 @@ class SchemaGraph:
         self,
         query_embedding: np.ndarray,
         *,
-        db_id: Optional[str],
+        db_id: str | None,
         top_m: int,
         synonym_tokens: set,
         synonym_boost: float,

@@ -18,8 +18,6 @@ import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Optional
-
 from ..schema.schema_chunker import SchemaChunk
 
 logger = logging.getLogger(__name__)
@@ -176,7 +174,7 @@ class NPMIScorer:
         question: str,
         chunks: list[SchemaChunk],
         *,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
         top_k: int = 30,
     ) -> list[dict]:
         """Score schema chunks by NPMI relevance to question.

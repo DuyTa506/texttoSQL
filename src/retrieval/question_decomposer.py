@@ -12,7 +12,6 @@ Config flag:
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +62,22 @@ class QuestionDecomposer:
         Questions shorter than this are never decomposed (avoid splitting
         trivial questions on incidental conjunctions).
     """
+
+    # ---- complexity scoring weights ----------------------------------------
+    # Token-length contribution: score += min(n / _LEN_DIVISOR, _LEN_MAX_CONTRIB)
+    _LEN_DIVISOR: float = 40.0
+    _LEN_MAX_CONTRIB: float = 0.3
+    # Per complex-keyword hit (at most one hit counts)
+    _KEYWORD_CONTRIB: float = 0.15
+    # Per relative-clause marker (capped at _REL_MAX_CONTRIB)
+    _REL_PER_MATCH: float = 0.1
+    _REL_MAX_CONTRIB: float = 0.2
+    # Multiple aggregation functions (≥2 hits vs. exactly 1)
+    _AGG_MULTI_CONTRIB: float = 0.2
+    _AGG_SINGLE_CONTRIB: float = 0.05
+    # Per comma in the question (capped at _COMMA_MAX_CONTRIB)
+    _COMMA_PER_COUNT: float = 0.05
+    _COMMA_MAX_CONTRIB: float = 0.15
 
     def __init__(
         self,
@@ -122,28 +137,28 @@ class QuestionDecomposer:
         question_lower = question.lower()
 
         # Token length signal: longer questions tend to be more complex
-        score += min(n / 40.0, 0.3)
+        score += min(n / self._LEN_DIVISOR, self._LEN_MAX_CONTRIB)
 
         # Presence of complex keywords
         for kw in _COMPLEX_KEYWORDS:
             if kw in question_lower:
-                score += 0.15
+                score += self._KEYWORD_CONTRIB
                 break
 
         # Relative clause markers
         rel_matches = len(_RELATIVE_MARKERS.findall(question))
-        score += min(rel_matches * 0.1, 0.2)
+        score += min(rel_matches * self._REL_PER_MATCH, self._REL_MAX_CONTRIB)
 
         # Multiple aggregation functions
         agg_matches = len(_AGGREGATION_RE.findall(question))
         if agg_matches >= 2:
-            score += 0.2
+            score += self._AGG_MULTI_CONTRIB
         elif agg_matches == 1:
-            score += 0.05
+            score += self._AGG_SINGLE_CONTRIB
 
         # Comma + clause structure
         comma_count = question.count(",")
-        score += min(comma_count * 0.05, 0.15)
+        score += min(comma_count * self._COMMA_PER_COUNT, self._COMMA_MAX_CONTRIB)
 
         return min(score, 1.0)
 

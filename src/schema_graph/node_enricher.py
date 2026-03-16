@@ -47,8 +47,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
+from src.embeddings.base import BaseEmbeddingModel
 from src.schema_graph.graph_types import KGNode, NodeType
 
 logger = logging.getLogger(__name__)
@@ -142,8 +142,8 @@ class NodeEnricher:
     def __init__(
         self,
         model: str = "gpt-4o-mini",
-        api_key: Optional[str] = None,
-        provider: Optional[str] = None,
+        api_key: str | None = None,
+        provider: str | None = None,
         max_retries: int = 3,
     ) -> None:
         self.model = model
@@ -157,7 +157,7 @@ class NodeEnricher:
         self,
         graph,       # SchemaGraph — avoid circular import at runtime
         *,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
         batch_size: int = 15,
         skip_existing: bool = True,
         sleep_between_batches: float = 0.5,
@@ -251,12 +251,11 @@ class NodeEnricher:
         self,
         graph,
         *,
-        db_id: Optional[str] = None,
-        embedding_model: str = "paraphrase-multilingual-mpnet-base-v2",
-        batch_size: int = 128,
+        db_id: str | None = None,
+        embedding_model: BaseEmbeddingModel | str = "paraphrase-multilingual-mpnet-base-v2",
         skip_existing: bool = True,
         # ── ChromaDB storage (recommended) ────────────────────────────────────
-        chroma_persist_dir: Optional[str] = None,
+        chroma_persist_dir: str | None = None,
         chroma_collection_name: str = "schema_graph_nodes",
     ) -> int:
         """
@@ -287,10 +286,11 @@ class NodeEnricher:
         db_id:
             Restrict to one database.
         embedding_model:
-            SentenceTransformer model name.  **Must match** the model used
-            for question embedding at inference time.
-        batch_size:
-            Encode batch size.  Larger = faster but more VRAM.
+            A ``BaseEmbeddingModel`` instance (``HuggingFaceEmbeddingModel`` or
+            ``OpenAIEmbeddingModel``) **or** a model-name string.  When a string
+            is given, a ``HuggingFaceEmbeddingModel`` is constructed automatically.
+            The model **must match** the one used for question embedding at
+            inference time.
         skip_existing:
             Skip nodes that already have a non-empty ``node.embedding``
             *or* are already present in the ChromaDB collection.
@@ -309,13 +309,14 @@ class NodeEnricher:
         int
             Number of nodes whose embeddings were (re-)computed.
         """
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is required for embed_nodes(). "
-                "Install with: pip install sentence-transformers"
-            )
+        # Resolve embedding model — accept instance or model-name string
+        if isinstance(embedding_model, str):
+            from src.embeddings.huggingface import HuggingFaceEmbeddingModel
+            model_name = embedding_model
+            embed_model: BaseEmbeddingModel = HuggingFaceEmbeddingModel(model_name)
+        else:
+            embed_model = embedding_model
+            model_name = getattr(embed_model, "model_name", type(embed_model).__name__)
 
         target_types = (NodeType.TABLE, NodeType.COLUMN)
 
@@ -356,21 +357,17 @@ class NodeEnricher:
             logger.info("embed_nodes: no nodes to embed.")
             return 0
 
-        model = SentenceTransformer(embedding_model)
         texts = [_node_to_embed_text(n) for n in candidates]
 
         logger.info(
             "Embedding %d nodes with '%s' (storage=%s) ...",
             len(candidates),
-            embedding_model,
+            model_name,
             f"ChromaDB:{chroma_collection_name}" if chroma_collection else "in-node",
         )
-        all_embeddings = model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=len(candidates) > 50,
-            convert_to_numpy=True,
-        )
+        # embed() returns list[list[float]] — works for both HF and OpenAI providers
+        all_embeddings = embed_model.embed(texts)
+        batch_size = getattr(embed_model, "batch_size", 128)
 
         if chroma_collection is not None:
             # ── ChromaDB path: batch upsert, keep node.embedding empty ────────
@@ -381,7 +378,7 @@ class NodeEnricher:
 
                 chroma_collection.upsert(
                     ids=[n.node_id for n in batch_nodes],
-                    embeddings=[e.tolist() for e in batch_embs],
+                    embeddings=batch_embs,
                     documents=[_node_to_embed_text(n) for n in batch_nodes],
                     metadatas=[
                         {
@@ -410,7 +407,7 @@ class NodeEnricher:
         else:
             # ── In-node fallback ──────────────────────────────────────────────
             for node, emb in zip(candidates, all_embeddings):
-                node.embedding = emb.tolist()
+                node.embedding = emb
             logger.info(
                 "embed_nodes: stored embeddings in %d nodes (in-node mode).",
                 len(candidates),
@@ -496,7 +493,7 @@ class NodeEnricher:
         Call the configured LLM provider and return the raw text response.
         Retries up to ``self.max_retries`` on transient errors.
         """
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
                 if self.provider == "openai":
@@ -521,7 +518,7 @@ class NodeEnricher:
 # ---------------------------------------------------------------------------
 
 
-def _call_openai(prompt: str, model: str, api_key: Optional[str]) -> str:
+def _call_openai(prompt: str, model: str, api_key: str | None) -> str:
     try:
         import openai
     except ImportError:
@@ -540,7 +537,7 @@ def _call_openai(prompt: str, model: str, api_key: Optional[str]) -> str:
     return response.choices[0].message.content or ""
 
 
-def _call_anthropic(prompt: str, model: str, api_key: Optional[str]) -> str:
+def _call_anthropic(prompt: str, model: str, api_key: str | None) -> str:
     try:
         import anthropic
     except ImportError:

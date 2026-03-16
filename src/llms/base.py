@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,9 @@ class BaseLLM(ABC):
     def generate(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         temperature: float = 0.0,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         """
@@ -56,7 +56,7 @@ class BaseLLM(ABC):
         """
 
     @abstractmethod
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         """Return a dict with at least ``provider`` and ``model_name`` keys."""
 
     # ── Optional: streaming (default wraps generate) ──────────────────────────
@@ -64,9 +64,9 @@ class BaseLLM(ABC):
     def stream(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         temperature: float = 0.0,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> Iterator[str]:
         """
@@ -88,9 +88,9 @@ class BaseLLM(ABC):
     async def agenerate(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         temperature: float = 0.0,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         """
@@ -109,9 +109,9 @@ class BaseLLM(ABC):
     async def astream(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         temperature: float = 0.0,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> AsyncIterator[str]:
         """

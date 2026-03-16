@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .sql_executor import ErrorType, ExecutionResult, SQLExecutor
 
@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+# Maximum characters of an error message shown in the retry log line
+_ERROR_MSG_PREVIEW_LEN = 120
 
 
 @dataclass
@@ -111,7 +114,7 @@ class RetryLoop:
         self,
         executor: SQLExecutor,
         inference: "SQLInference",
-        config: Optional[RetryConfig] = None,
+        config: RetryConfig | None = None,
     ):
         self.executor = executor
         self.inference = inference
@@ -125,7 +128,7 @@ class RetryLoop:
         schema_context: str,
         initial_result: dict,
         db_id: str,
-        gold_sql: Optional[str] = None,
+        gold_sql: str | None = None,
     ) -> dict:
         """Run the retry loop starting from *initial_result*.
 
@@ -184,7 +187,7 @@ class RetryLoop:
                 attempt + 1,
                 self.config.max_retries,
                 exec_result.error_type.value,
-                exec_result.error_message[:120],
+                exec_result.error_message[:_ERROR_MSG_PREVIEW_LEN],
             )
 
             # Build correction prompt and re-generate

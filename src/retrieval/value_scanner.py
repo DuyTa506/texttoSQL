@@ -13,11 +13,11 @@ Config flags:
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Optional
 
 from ..schema.models import Database
 
@@ -29,6 +29,25 @@ _DEFAULT_MIN_SCORE = 0.75
 _TEXT_DTYPES = frozenset({
     "text", "varchar", "char", "string", "nvarchar", "name",
     "character", "mediumtext", "longtext", "clob",
+})
+
+# ---- candidate extraction constants ----------------------------------------
+
+# Minimum length for a quoted string to be a useful candidate
+_MIN_QUOTED_LEN = 2
+# Regex: single- or double-quoted strings of at least _MIN_QUOTED_LEN chars
+_QUOTED_STRING_RE = re.compile(r'["\']([^"\']{' + str(_MIN_QUOTED_LEN) + r',})["\']')
+# Regex: runs of Title-case words (named entities like "New York")
+_CAPITALIZED_PHRASE_RE = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')
+# Regex: word tokens (letters + underscores + digits)
+_WORD_TOKEN_RE = re.compile(r"[a-zA-Z_]\w*")
+# Minimum token length to include as a candidate
+_MIN_TOKEN_LEN = 3
+# Common question stop-words that are rarely DB values
+_STOP_WORDS = frozenset({
+    "the", "and", "for", "are", "was", "were", "has", "have",
+    "had", "been", "with", "that", "this", "from", "what",
+    "which", "who", "how", "many", "all", "each", "any",
 })
 
 
@@ -103,35 +122,33 @@ class ValueScanner:
         matches: list[ValueMatch] = []
 
         try:
-            conn = sqlite3.connect(db.db_path)
-            conn.execute("PRAGMA read_uncommitted = true")
-            cursor = conn.cursor()
+            with sqlite3.connect(db.db_path) as conn:
+                conn.execute("PRAGMA read_uncommitted = true")
+                cursor = conn.cursor()
 
-            for table in db.tables:
-                for column in table.columns:
-                    # Skip non-text columns to avoid scanning numeric/blob data
-                    if not self._is_text_column(column.dtype):
-                        continue
-
-                    values = self._fetch_distinct_values(
-                        cursor, table.name, column.name
-                    )
-                    for value in values:
-                        if not value:
+                for table in db.tables:
+                    for column in table.columns:
+                        # Skip non-text columns to avoid scanning numeric/blob data
+                        if not self._is_text_column(column.dtype):
                             continue
-                        for candidate in candidates:
-                            score = self._similarity(candidate, value)
-                            if score >= self.min_score:
-                                matches.append(
-                                    ValueMatch(
-                                        table_name=table.name,
-                                        column_name=column.name,
-                                        matched_value=value,
-                                        score=score,
-                                    )
-                                )
 
-            conn.close()
+                        values = self._fetch_distinct_values(
+                            cursor, table.name, column.name
+                        )
+                        for value in values:
+                            if not value:
+                                continue
+                            for candidate in candidates:
+                                score = self._similarity(candidate, value)
+                                if score >= self.min_score:
+                                    matches.append(
+                                        ValueMatch(
+                                            table_name=table.name,
+                                            column_name=column.name,
+                                            matched_value=value,
+                                            score=score,
+                                        )
+                                    )
         except Exception as e:
             logger.warning("ValueScanner error for db '%s': %s", db.db_id, e)
             return []
@@ -223,30 +240,20 @@ class ValueScanner:
         Priority order:
           1. Quoted strings (single or double quotes)
           2. Capitalized multi-word phrases (e.g. "New York")
-          3. Individual tokens ≥ 3 characters
+          3. Individual tokens ≥ _MIN_TOKEN_LEN characters
         """
         candidates: list[str] = []
 
         # 1. Quoted strings
-        import re
-        quoted = re.findall(r'["\']([^"\']{2,})["\']', question)
-        candidates.extend(quoted)
+        candidates.extend(_QUOTED_STRING_RE.findall(question))
 
         # 2. Capitalized sequences (potential named entities)
-        # Match runs of Title-case or ALL-CAPS words
-        cap_runs = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', question)
-        candidates.extend(cap_runs)
+        candidates.extend(_CAPITALIZED_PHRASE_RE.findall(question))
 
-        # 3. Individual tokens (lowercase, len >= 3), skip stop-words
-        _STOP = frozenset({
-            "the", "and", "for", "are", "was", "were", "has", "have",
-            "had", "been", "with", "that", "this", "from", "what",
-            "which", "who", "how", "many", "all", "each", "any",
-        })
-        tokens = re.findall(r"[a-zA-Z_]\w*", question)
-        for tok in tokens:
+        # 3. Individual tokens (lowercase, len >= _MIN_TOKEN_LEN), skip stop-words
+        for tok in _WORD_TOKEN_RE.findall(question):
             tok_low = tok.lower()
-            if len(tok_low) >= 3 and tok_low not in _STOP:
+            if len(tok_low) >= _MIN_TOKEN_LEN and tok_low not in _STOP_WORDS:
                 candidates.append(tok)
 
         # Deduplicate preserving order

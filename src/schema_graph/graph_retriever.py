@@ -53,7 +53,6 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
-from typing import Optional
 
 import numpy as np
 
@@ -154,8 +153,8 @@ class GraphRetriever:
         self,
         query: str,
         *,
-        db_id: Optional[str] = None,
-        value_matches: Optional[list] = None,
+        db_id: str | None = None,
+        value_matches: list | None = None,
     ) -> list[dict]:
         """
         Retrieve relevant schema nodes for *query* via PPR.
@@ -186,7 +185,7 @@ class GraphRetriever:
         adaptive_max = self._adaptive_max_nodes(db_id)
 
         # v3: Convert ValueMatch list → {node_id → boost} dict
-        value_boost: Optional[dict[str, float]] = None
+        value_boost: dict[str, float] | None = None
         if value_matches:
             value_boost = {}
             for m in value_matches:
@@ -239,8 +238,8 @@ class GraphRetriever:
         self,
         queries: list[str],
         *,
-        db_id: Optional[str] = None,
-        value_matches: Optional[list] = None,
+        db_id: str | None = None,
+        value_matches: list | None = None,
     ) -> list[dict]:
         """
         Retrieve for multiple sub-queries and merge via RRF.
@@ -290,7 +289,7 @@ class GraphRetriever:
     def _nodes_to_dicts(
         self,
         nodes_with_scores: list[tuple[KGNode, float]],  # Fix 1: accept tuples
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
     ) -> list[dict]:
         """
         Convert a list of (KGNode, score) tuples to the chunk-format dicts
@@ -376,7 +375,7 @@ class GraphRetriever:
 
     # ── Fix 2: Adaptive max_nodes ──────────────────────────────────────────────
 
-    def _adaptive_max_nodes(self, db_id: Optional[str]) -> int:
+    def _adaptive_max_nodes(self, db_id: str | None) -> int:
         """
         Compute an adaptive hard cap on returned nodes based on DB size.
 
@@ -484,7 +483,7 @@ class GraphRetriever:
         self,
         nodes_with_scores: list[tuple[KGNode, float]],
         min_keep: int = 2,
-        db_id: Optional[str] = None,
+        db_id: str | None = None,
     ) -> list[tuple[KGNode, float]]:
         """
         Remove low-confidence tail nodes via an elbow-cut heuristic.

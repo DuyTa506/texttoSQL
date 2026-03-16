@@ -10,7 +10,6 @@ Strategies:
 from __future__ import annotations
 
 import re
-from typing import Optional, Union
 
 from ..schema.models import Database
 
@@ -32,11 +31,11 @@ class QueryAugmentor:
     def augment(
         self,
         question: str,
-        db: Optional[Database] = None,
+        db: Database | None = None,
         *,
         value_scanner=None,
         decomposer=None,
-    ) -> Union[str, list[str]]:
+    ) -> str | list[str]:
         """Return the augmented query string (or list of strings for 'decompose').
 
         Parameters
@@ -70,7 +69,7 @@ class QueryAugmentor:
 
     # ---- strategies ---------------------------------------------------------
 
-    def _keyword_augment(self, question: str, db: Optional[Database]) -> str:
+    def _keyword_augment(self, question: str, db: Database | None) -> str:
         """Append table/column tokens found in the question."""
         if db is None:
             return question
@@ -103,7 +102,7 @@ class QueryAugmentor:
     def _value_augment(
         self,
         question: str,
-        db: Optional[Database],
+        db: Database | None,
         value_scanner,
     ) -> str:
         """Keyword augment + ValueScanner cell-value hints.
@@ -141,9 +140,9 @@ class QueryAugmentor:
     def _decompose_augment(
         self,
         question: str,
-        db: Optional[Database],
+        db: Database | None,
         decomposer,
-    ) -> Union[str, list[str]]:
+    ) -> str | list[str]:
         """Decompose complex question into sub-questions, augment each with keywords.
 
         Returns list[str] when multiple sub-questions are produced,

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .base import BaseLLM
 from .huggingface import HuggingFaceLLM
@@ -25,7 +25,7 @@ from .openai import OpenAILLM
 logger = logging.getLogger(__name__)
 
 # Registry — extend here if a truly incompatible provider is added later
-_PROVIDERS: Dict[str, type] = {
+_PROVIDERS: dict[str, type] = {
     "openai": OpenAILLM,
     "huggingface": HuggingFaceLLM,
     # Aliases
@@ -64,7 +64,7 @@ class LLMFactory:
     """
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> Optional[BaseLLM]:
+    def from_config(cls, config: dict[str, Any]) -> BaseLLM | None:
         """
         Build an LLM from a configuration dictionary.
 
@@ -128,9 +128,9 @@ class LLMFactory:
         cls,
         model_name: str = "gpt-4o-mini",
         *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        organization: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        organization: str | None = None,
         **kwargs,
     ) -> OpenAILLM:
         """

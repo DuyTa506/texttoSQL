@@ -17,7 +17,7 @@ Any sentence-transformers compatible model works as a drop-in replacement:
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Union
+from typing import Union
 
 from .base import BaseEmbeddingModel
 
@@ -48,7 +48,7 @@ class HuggingFaceEmbeddingModel(BaseEmbeddingModel):
     def __init__(
         self,
         model_name: str = _DEFAULT_MODEL,
-        device: Optional[str] = None,
+        device: str | None = None,
         batch_size: int = _DEFAULT_BATCH,
         normalize_embeddings: bool = True,
     ):
@@ -82,7 +82,7 @@ class HuggingFaceEmbeddingModel(BaseEmbeddingModel):
             self.get_embedding_dimension(),
         )
 
-    def embed(self, texts: Union[str, List[str]]) -> List[List[float]]:
+    def embed(self, texts: str | list[str]) -> list[list[float]]:
         """
         Embed one or more texts.
 

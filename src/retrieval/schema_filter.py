@@ -4,8 +4,6 @@ Schema Filter – selects top-K schema elements and formats them for the LLM pro
 
 from __future__ import annotations
 
-from typing import Optional
-
 from ..schema.models import Database
 from ..schema.schema_chunker import SchemaChunk
 
@@ -21,8 +19,8 @@ class SchemaFilter:
         retrieved_chunks: list[dict],
         db: Database,
         *,
-        top_k: Optional[int] = None,
-        value_hints: Optional[str] = None,
+        top_k: int | None = None,
+        value_hints: str | None = None,
     ) -> str:
         """Select top-K chunks and produce a structured schema string.
 
@@ -55,7 +53,7 @@ class SchemaFilter:
         # Group by table
         table_chunks: dict[str, list[SchemaChunk]] = {}
         for item in sorted_chunks:
-            chunk: Optional[SchemaChunk] = item.get("chunk")
+            chunk: SchemaChunk | None = item.get("chunk")
             if chunk is None:
                 continue
             tname = chunk.table_name or "__other__"
@@ -148,7 +146,7 @@ class SchemaFilter:
         """Return the set of table names in the retrieved chunks."""
         tables: set[str] = set()
         for item in retrieved_chunks:
-            chunk: Optional[SchemaChunk] = item.get("chunk")
+            chunk: SchemaChunk | None = item.get("chunk")
             if chunk and chunk.table_name:
                 tables.add(chunk.table_name)
         return tables

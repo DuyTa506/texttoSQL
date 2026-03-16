@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from itertools import combinations
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -83,7 +83,7 @@ W_SYNONYM_MAX: float = 0.85                  # high precision signal
 def build_semantic_edges(
     graph: "SchemaGraph",
     *,
-    db_id: Optional[str] = None,
+    db_id: str | None = None,
     lexical_threshold: float = DEFAULT_LEXICAL_THRESHOLD,
     embedding_threshold: float = DEFAULT_EMBEDDING_THRESHOLD,
     synonym_min_overlap: int = DEFAULT_SYNONYM_MIN_OVERLAP,
@@ -250,7 +250,7 @@ def _build_embedding_edges(
     edges: list[KGEdge] = []
 
     # Pre-convert to numpy arrays (skip nodes without embeddings)
-    def _to_array(node: KGNode) -> Optional[np.ndarray]:
+    def _to_array(node: KGNode) -> np.ndarray | None:
         if not node.embedding:
             return None
         arr = np.array(node.embedding, dtype=np.float32)

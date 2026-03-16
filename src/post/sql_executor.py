@@ -13,8 +13,6 @@ import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
-
 logger = logging.getLogger(__name__)
 
 
@@ -103,7 +101,7 @@ class SQLExecutor:
         self,
         sql: str,
         db_id: str,
-        gold_sql: Optional[str] = None,
+        gold_sql: str | None = None,
     ) -> ExecutionResult:
         """Execute *sql* against *db_id* and return a classified result.
 
@@ -212,7 +210,7 @@ class SQLExecutor:
 
     # ---- helpers ------------------------------------------------------------
 
-    def _resolve_db_path(self, db_id: str) -> Optional[Path]:
+    def _resolve_db_path(self, db_id: str) -> Path | None:
         """Return path to the SQLite file for *db_id*, or None if not found."""
         candidates = [
             self.db_dir / db_id / f"{db_id}.sqlite",
@@ -226,7 +224,7 @@ class SQLExecutor:
         return None
 
     @staticmethod
-    def _run_gold(gold_sql: str, db_path: Path) -> Optional[list]:
+    def _run_gold(gold_sql: str, db_path: Path) -> list | None:
         """Execute gold SQL and return rows, or None on error."""
         try:
             conn = sqlite3.connect(str(db_path))

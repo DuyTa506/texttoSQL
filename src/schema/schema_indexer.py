@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import chromadb
 from chromadb.config import Settings
@@ -53,7 +53,7 @@ class SchemaIndexer:
         persist_dir: str = "./data/chroma_db",
         collection_name: str = "schema_chunks",
         batch_size: int = 128,
-        encoder: Optional["BaseEmbeddingModel"] = None,
+        encoder: "BaseEmbeddingModel | None" = None,
     ):
         self.embedding_model_name = embedding_model
         self.persist_dir = persist_dir
@@ -61,12 +61,12 @@ class SchemaIndexer:
         self.batch_size = batch_size
 
         # External encoder takes priority over lazy SentenceTransformer
-        self._external_encoder: Optional["BaseEmbeddingModel"] = encoder
+        self._external_encoder: "BaseEmbeddingModel | None" = encoder
 
         # Lazy-loaded (only used when no external encoder is provided)
         self._st_encoder = None  # SentenceTransformer instance
-        self._client: Optional[chromadb.ClientAPI] = None
-        self._collection: Optional[chromadb.Collection] = None
+        self._client: chromadb.ClientAPI | None = None
+        self._collection: chromadb.Collection | None = None
 
     # ---- lazy initialisation ------------------------------------------------
 
@@ -202,14 +202,14 @@ class SchemaIndexer:
         query_text: str,
         *,
         top_k: int = 10,
-        db_id: Optional[str] = None,
-        chunk_type: Optional[str] = None,
+        db_id: str | None = None,
+        chunk_type: str | None = None,
     ) -> list[dict]:
         """Query the index for similar chunks.
 
         Returns list of dicts with keys: id, content, metadata, distance.
         """
-        where_clause: Optional[dict] = None
+        where_clause: dict | None = None
         conditions = []
         if db_id:
             conditions.append({"db_id": db_id})
@@ -250,7 +250,7 @@ class _STCompatWrapper:
     def __init__(self, model: "BaseEmbeddingModel"):
         self._model = model
 
-    def encode(self, texts: Union[str, list[str]], **kwargs):
+    def encode(self, texts: str | list[str], **kwargs):
         """Mimic SentenceTransformer.encode() return value (list of lists)."""
         import numpy as np
 

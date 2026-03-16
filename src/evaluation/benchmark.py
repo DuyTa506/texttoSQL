@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
-
 from rich.console import Console
 from rich.table import Table as RichTable
 from tqdm import tqdm
@@ -50,8 +48,8 @@ class Benchmark:
         examples: list[Example],
         retrieved_schemas: dict[str, list[dict]],
         *,
-        output_dir: Optional[str] = None,
-        subset: Optional[int] = None,
+        output_dir: str | None = None,
+        subset: int | None = None,
     ) -> dict:
         """Run evaluation on a set of examples.
 

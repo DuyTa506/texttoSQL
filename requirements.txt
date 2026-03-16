@@ -23,3 +23,4 @@ tqdm>=4.66.0
 rich>=13.0
 ijson>=3.2.0
 numpy>=1.26.0
+scipy>=1.14.0

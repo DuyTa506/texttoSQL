@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Optional
-
 from .sql_executor import ErrorType, SQLExecutor
 
 logger = logging.getLogger(__name__)
@@ -101,7 +99,7 @@ class CandidateSelector:
         """Majority vote on result-set content."""
         # Execute all candidates and group by result-set hash
         clusters: dict[str, list[int]] = {}  # hash → list of candidate indices
-        hashes: list[Optional[str]] = []
+        hashes: list[str | None] = []
 
         for i, candidate in enumerate(candidates):
             sql = candidate.get("sql", "")

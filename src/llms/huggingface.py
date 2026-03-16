@@ -14,7 +14,7 @@ Use this for:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Iterator
 
 from .base import BaseLLM
 
@@ -113,9 +113,9 @@ class HuggingFaceLLM(BaseLLM):
     def generate(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> str:
         import torch
@@ -145,9 +145,9 @@ class HuggingFaceLLM(BaseLLM):
     def stream(
         self,
         user_prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         **kwargs,
     ) -> Iterator[str]:
         """
@@ -201,7 +201,7 @@ class HuggingFaceLLM(BaseLLM):
             # Fallback: yield complete response
             yield self.generate(user_prompt, system_prompt, temperature, max_tokens)
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         return {
             "provider": "huggingface",
             "model_name": self.model_name,
@@ -221,7 +221,7 @@ _DEFAULT_HF_SYSTEM_PROMPT = (
 )
 
 
-def _build_chatml(user_prompt: str, system_prompt: Optional[str] = None) -> str:
+def _build_chatml(user_prompt: str, system_prompt: str | None = None) -> str:
     """
     Build a ChatML-formatted prompt string for Qwen3 and compatible models.
 

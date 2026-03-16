@@ -10,8 +10,6 @@ Implements the table-first → FK-expansion strategy from RSL-SQL:
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
 from ..schema.models import Database
 from ..schema.schema_chunker import SchemaChunk
 
@@ -55,7 +53,7 @@ class BidirectionalLinker:
         # Collect already-retrieved table names
         seen_tables: set[str] = set()
         for item in retrieved_chunks:
-            chunk: Optional[SchemaChunk] = item.get("chunk")
+            chunk: SchemaChunk | None = item.get("chunk")
             if chunk and chunk.table_name:
                 seen_tables.add(chunk.table_name.lower())
 
