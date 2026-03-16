@@ -147,10 +147,13 @@ All edges are bidirectional. Layers 1 and 2a (lexical) require no API calls and 
 
 ```
 1. Embed question → cosine score vs. all COLUMN + TABLE node embeddings
-2. Synonym token boost for nodes whose synonyms match question tokens
+2. Synonym token boost for nodes whose synonyms match question tokens (NL stopwords filtered)
 3. Top-M nodes become PPR seed set with personalisation proportional to cosine score
-4. Power iteration (max_hops=2, alpha=0.7) propagates relevance along edge weights
-5. Return nodes above score threshold, ranked, capped at max_nodes=20
+4. PPR runs on per-DB subgraph view (O(1), prevents cross-DB probability leakage)
+5. Power iteration (alpha=0.7) propagates real PPR scores (not rank proxies) along edge weights
+6. FK bridge pass: for every FK column in result, add missing FK-target table + columns
+7. Score-gap pruning: drop tail nodes where prev_score/curr_score > gap_ratio (default 3.0)
+8. Adaptive cap: max_nodes = min(max_nodes, max(6, db_table_count)) — prevents over-retrieval on small DBs
 ```
 
 ### LLM Node Enrichment (one-time offline)
@@ -389,6 +392,64 @@ ruff check src/ training/ scripts/ llms/ embeddings/
 | EHRSQL | OmniSQL | 1K dev | Evaluation |
 | ScienceBenchmark | OmniSQL | 299 dev | Evaluation |
 | Spider-DK/Syn/Realistic | OmniSQL | 2K+ dev | Evaluation |
+
+---
+
+## Retrieval Quality Results
+
+Evaluated on **BIRD Dev (n=1,534 examples, 11 databases)** using schema-linking metrics only (no SQL generation).
+Graph: `bird_dev_enriched_v2.json` (LLM-enriched, all 3 edge layers). Retriever settings: `top_m=5, alpha=0.7, max_nodes=20, score_threshold=0.01`.
+
+> Full analysis: [`docs/report.md`](docs/report.md)
+
+### Overall
+
+| Retriever | Tbl Recall | Tbl Prec | **Tbl F1** | Col Prec | Exact Match | Noisy | Avg Tokens |
+|---|---|---|---|---|---|---|---|
+| HybridRetriever *(baseline)* | **0.988** | 0.392 | 0.561 | 0.105 | 2.9% | 767 | 193 |
+| GraphRetriever v1 *(pre-fix)* | — | — | 0.672 | — | — | — | — |
+| **GraphRetriever v2** *(8-fix)* | 0.925 | **0.622** | **0.744** | **0.141** | **21.9%** | **260** | **77** |
+| Graph+Hybrid merge | 0.974 | 0.486 | 0.648 | 0.118 | 5.5% | 363 | 109 |
+
+**v1 → v2:** F1 +7.2 pp · Column precision 3× (4.7% → 14.1%) · Noisy −35% · Prompt size −36%
+
+### Join-Complexity (Table F1)
+
+| Complexity | #Ex | Hybrid | Graph v2 | Merge |
+|---|---|---|---|---|
+| 1-table | 364 | 0.362 | **0.636** | 0.461 |
+| 2-table | 928 | 0.591 | **0.773** | 0.678 |
+| 3-table | 202 | 0.689 | **0.759** | 0.758 |
+| 4+-table | 40 | 0.691 | 0.700 | **0.740** |
+
+### Per-Database (GraphRetriever v2)
+
+| Database | n | Recall | Prec | **F1** | FK Pair R | Avg Tokens |
+|---|---|---|---|---|---|---|
+| thrombosis_prediction | 163 | 0.917 | 0.836 | **0.875** | 0.837 | 50 |
+| california_schools | 89 | 0.876 | 0.835 | **0.855** | 0.775 | 47 |
+| card_games | 191 | 0.942 | 0.776 | **0.851** | 0.932 | 52 |
+| debit_card_specializing | 64 | 0.904 | 0.698 | **0.788** | 0.984 | 30 |
+| student_club | 158 | 0.930 | 0.655 | **0.769** | 0.864 | 58 |
+| superhero | 129 | 0.989 | 0.614 | **0.757** | 0.984 | 80 |
+| european_football_2 | 129 | 0.879 | 0.651 | **0.748** | 0.798 | 137 |
+| financial | 106 | 0.843 | 0.627 | **0.719** | 0.724 | 66 |
+| toxicology | 145 | 0.987 | 0.537 | **0.695** | 0.982 | 50 |
+| codebase_community | 186 | 0.969 | 0.419 | **0.585** | 0.964 | 109 |
+| formula_1 | 174 | 0.877 | 0.356 | **0.506** | 0.797 | 124 |
+
+### What the 8 Fixes Addressed
+
+| Fix | What it solved | Impact |
+|---|---|---|
+| **Fix 1** — Real PPR scores | `1/(i+1)` rank proxy discarded confidence; downstream RRF used wrong weights | Correct RRF fusion weights |
+| **Fix 2** — Adaptive `max_nodes` | Fixed cap of 20 returned 10 tables for 1-table queries on dense DBs | Precision +10 pp |
+| **Fix 3** — Score-gap pruning | Low-confidence tail nodes sneak in above 0.05 threshold | Noisy 400+→260 (−35%) |
+| **Fix 4** — Synonym stopwords | "what/are/the" tokens spuriously boosted nodes with generic synonyms | Cleaner seed scoring |
+| **Fix 5** — Per-DB PPR subgraph | PPR ran on full multi-DB graph; mass leaked across databases | 4× speedup, correctness |
+| **Fix 6** — FK bridge tables | PPR found FK columns on both join sides but missed the hub table | Orphaned FK: 8.6%→0.0% |
+| **Fix 7** — Column score filtering | All columns shown regardless of score; col precision was 4.7% | ColPrec 4.7%→14.1% (3×) |
+| **Fix 8** — `hybrid_weight` in RRF | `hybrid_weight` param declared but never applied (dead code) | Tunable fusion enabled |
 
 ---
 
