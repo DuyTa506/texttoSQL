@@ -518,7 +518,7 @@ class GraphRetriever(BaseRetriever):
             if table_count >= 10:
                 gap_ratio = max(self.score_gap_ratio, 4.5)  # looser for large DBs
             elif table_count <= 4:
-                gap_ratio = min(self.score_gap_ratio, 2.0)  # tighter for small DBs
+                gap_ratio = max(self.score_gap_ratio, 4.5)  # looser for small DBs — can't over-retrieve much
         if gap_ratio <= 0 or len(nodes_with_scores) <= min_keep:
             return nodes_with_scores
 
