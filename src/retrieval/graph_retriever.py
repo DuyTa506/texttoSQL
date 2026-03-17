@@ -124,6 +124,7 @@ class GraphRetriever(BaseRetriever):
         *,
         top_m: int = 5,
         alpha: float = 0.7,
+        max_hops: int = 2,
         ppr_max_iter: int = 100,
         score_threshold: float = 0.05,
         max_nodes: int = 20,
@@ -138,6 +139,7 @@ class GraphRetriever(BaseRetriever):
         self.embedder = embedder
         self.top_m = top_m
         self.alpha = alpha
+        self.max_hops = max_hops
         self.ppr_max_iter = ppr_max_iter
         self.score_threshold = score_threshold
         self.max_nodes = max_nodes
@@ -202,7 +204,7 @@ class GraphRetriever(BaseRetriever):
             db_id=db_id,
             top_m=self.top_m,
             alpha=self.alpha,
-            max_iter=self.ppr_max_iter,
+            max_iter=self.max_hops * 50,
             score_threshold=self.score_threshold,
             max_nodes=adaptive_max,
             synonym_tokens=synonym_tokens,

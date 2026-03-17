@@ -437,15 +437,31 @@ class SchemaGraph:
         for nid, boost in value_matched_nodes.items():
             scores[nid] = min(scores.get(nid, 0.0) + boost, 1.0)
 
-    @staticmethod
     def _build_personalization(
+        self,
         scores: dict[str, float],
         top_m: int,
     ) -> dict[str, float]:
-        """Step 3 — build the normalized PPR personalization vector from top-M seeds."""
+        """Step 3 — build the normalized PPR personalization vector from top-M seeds.
+
+        v3: When a FK column is selected as a seed, its parent TABLE node is also
+        injected at half the column's score.  This gives the PPR walk a direct
+        table-level entry point instead of having to traverse 4 hops
+        (column → COLUMN_BELONGS_TO → table → TABLE_HAS_COLUMN → column).
+        Expected gain: +3–5 pp recall on multi-join queries.
+        """
         sorted_seeds = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         seed_ids = [nid for nid, _ in sorted_seeds[:top_m]]
-        raw = {nid: max(scores[nid], 1e-9) for nid in seed_ids}
+        raw: dict[str, float] = {nid: max(scores[nid], 1e-9) for nid in seed_ids}
+
+        # v3: inject parent TABLE node for every FK-column seed
+        for nid in seed_ids:
+            node = self.nodes.get(nid)
+            if node is not None and node.is_fk and node.table_name:
+                tbl_nid = f"{node.db_id}.{node.table_name}"
+                if tbl_nid not in raw and tbl_nid in self.nodes:
+                    raw[tbl_nid] = raw[nid] * 0.5   # table seed at half the column's weight
+
         total = sum(raw.values())
         return {nid: s / total for nid, s in raw.items()}
 

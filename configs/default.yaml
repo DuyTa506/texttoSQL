@@ -65,6 +65,7 @@ schema_graph:
   # PPR retrieval parameters
   top_m: 5                                 # PPR seed nodes (top cosine matches)
   alpha: 0.7                              # PPR damping factor (higher = closer to seeds)
+  max_hops: 2                             # PPR traversal depth (maps to max_iter = max_hops * 50)
   score_threshold: 0.05                   # Min PPR score to include a node
   max_nodes: 20                           # Hard cap on returned nodes per query
   synonym_boost: 0.3                      # Extra score for synonym token match

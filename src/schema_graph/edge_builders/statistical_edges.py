@@ -75,7 +75,7 @@ W_CO_SELECT_MAX: float = 0.70
 W_VALUE_OVERLAP_MAX: float = 0.85
 
 # v3: Inferred FK from VALUE_OVERLAP (for DBs lacking explicit FK declarations)
-W_INFERRED_FK: float = 0.80
+W_INFERRED_FK: float = 0.95
 INFERRED_FK_JACCARD_THRESHOLD: float = 0.50      # min Jaccard to infer FK
 INFERRED_FK_MIN_SHARED: int = 3                   # min shared values to infer FK
 
@@ -437,7 +437,7 @@ def build_value_overlap_edges(
                     # Column-level INFERRED_FK
                     edges.extend(_bidir(id_a, id_b, EdgeType.INFERRED_FK, W_INFERRED_FK, inferred_meta))
 
-                    # Table-level TABLE_FK (deduplicated)
+                    # Table-level TABLE_FK / TABLE_FK_REV (deduplicated)
                     tbl_a_id = f"{current_db}.{node_a.table_name}"
                     tbl_b_id = f"{current_db}.{node_b.table_name}"
                     tbl_pair = frozenset([tbl_a_id, tbl_b_id])
@@ -449,7 +449,16 @@ def build_value_overlap_edges(
                             "shared_count": len(shared),
                             "inferred_from": [id_a, id_b],
                         }
-                        edges.extend(_bidir(tbl_a_id, tbl_b_id, EdgeType.TABLE_FK, W_INFERRED_FK, tbl_meta))
+                        edges.append(KGEdge(
+                            src_id=tbl_a_id, dst_id=tbl_b_id,
+                            edge_type=EdgeType.TABLE_FK,
+                            weight=W_INFERRED_FK, metadata=tbl_meta,
+                        ))
+                        edges.append(KGEdge(
+                            src_id=tbl_b_id, dst_id=tbl_a_id,
+                            edge_type=EdgeType.TABLE_FK_REV,
+                            weight=W_INFERRED_FK, metadata=tbl_meta,
+                        ))
 
     inferred_fk_count = sum(1 for e in edges if e.edge_type == EdgeType.INFERRED_FK) // 2
     inferred_table_fk_count = sum(

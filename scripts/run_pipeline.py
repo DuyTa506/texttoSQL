@@ -247,6 +247,7 @@ def _build_retriever(
         embedder,
         top_m=sg_cfg.get("top_m", 5),
         alpha=sg_cfg.get("alpha", 0.7),
+        max_hops=sg_cfg.get("max_hops", 2),
         score_threshold=sg_cfg.get("score_threshold", 0.05),
         max_nodes=sg_cfg.get("max_nodes", 20),
         synonym_boost=sg_cfg.get("synonym_boost", 0.3),
