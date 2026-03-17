@@ -1,11 +1,12 @@
 # Retrieval Analysis Report: BIRD Dev — Full Benchmark (1 534 Examples)
 
-**Date**: 2026-03-16
+**Date**: 2026-03-17 (updated)
 **Benchmark**: BIRD Dev — all 11 databases, 1 534 examples
 **Graph versions tested**:
 - `bird_dev_enriched_v2.json` — GraphRetriever v2 (8-fix batch)
 - `bird_dev_v3.json` — GraphRetriever v3 (TABLE_FK + INFERRED_FK + reduced CO_JOIN + FK bridge + adaptive gap)
 - `bird_dev_v3b.json` — GraphRetriever v3b (v3 + Layer 2b: EMBEDDING_SIMILAR + SYNONYM_MATCH edges)
+- `bird_dev_v3_rebuild.json` — GraphRetriever v3+fix (v3 rebuild + adaptive gap ratio bug fix: small DB now uses looser ratio)
 
 **Script**: `scripts/analyze_retrieval.py`
 **Result files**:
@@ -16,13 +17,15 @@
 | GraphRetriever v2 | `results/bird_retrieval_analysis_graph_v2_full.json` |
 | GraphRetriever v3 | `results/bird_retrieval_analysis_graph_v3_full.json` |
 | GraphRetriever v3b | `results/bird_retrieval_analysis_graph_full.json` |
-| Graph+Hybrid merge | `results/bird_retrieval_analysis_hybrid_merge_full.json` |
+| **GraphRetriever v3+fix** | `results/bird_retrieval_analysis_graph_1534.json` |
+| Graph+Hybrid merge *(v2)* | `results/bird_retrieval_analysis_hybrid_merge_full.json` |
+| **Graph+Hybrid merge *(v3+fix)*** | `results/bird_retrieval_analysis_hybrid_merge_1534.json` |
 
 ---
 
 ## 1. Executive Summary
 
-Three retrievers evaluated side-by-side on the full BIRD Dev set, plus two v3 graph variants.
+Four retrievers evaluated side-by-side on the full BIRD Dev set, plus graph variants.
 All metrics are schema-linking only (no SQL generation).
 
 | Retriever | Tbl Recall | Tbl Prec | **Tbl F1** | Exact Match | Missed Ex | Noisy Ex | Avg Tokens |
@@ -30,18 +33,20 @@ All metrics are schema-linking only (no SQL generation).
 | HybridRetriever *(baseline)* | **0.988** | 0.392 | 0.561 | 2.9% | 46 | 767 | 193 |
 | GraphRetriever v1 *(pre-8-fix)* | — | — | 0.672 | — | — | — | — |
 | GraphRetriever v2 *(8-fix)* | 0.925 | **0.622** | **0.744** | **21.9%** | 251 | **260** | **77** |
-| **GraphRetriever v3** | 0.931 | 0.599 | 0.729 | 20.0% | 236 | 298 | 80 |
-| **GraphRetriever v3b** *(+Layer 2b)* | 0.932 | 0.590 | 0.723 | 20.1% | **230** | 323 | 77 |
+| GraphRetriever v3 | 0.931 | 0.599 | 0.729 | 20.0% | 236 | 298 | 80 |
+| GraphRetriever v3b *(+Layer 2b)* | 0.932 | 0.590 | 0.723 | 20.1% | 230 | 323 | 77 |
+| **GraphRetriever v3+fix** *(adaptive gap fix)* | **0.936** | 0.600 | 0.731 | 20.8% | **223** | 279 | **78** |
 | Graph+Hybrid merge *(v2)* | 0.974 | 0.486 | 0.648 | 5.5% | 96 | 363 | 109 |
+| **Graph+Hybrid merge *(v3+fix)*** | 0.972 | 0.489 | 0.651 | 5.7% | 102 | 344 | 106 |
 
 **Key headline numbers:**
 
 - GraphRetriever v2 **F1 +18.3 pp** vs Hybrid (0.744 vs 0.561), driven by +23 pp precision.
-- **v3 improves recall** (+0.6 pp over v2) but **loses precision** (−2.3 pp) due to FK bridge injection.
-- **v3b (with Layer 2b edges) improves recall further** (+0.8 pp over v2, 21 fewer missed examples) but synonym edge density (42K edges) dilutes precision further (−3.2 pp).
-- v3 targets (F1 ≥ 0.78, Recall ≥ 0.95) **not met** — recall-precision tradeoff requires more surgical edge tuning.
-- Context size: Graph v2 averages **77 tokens** vs Hybrid's 193 (2.5× smaller prompt).
-- Exact match (recall=1 AND precision=1): **Graph v2 21.9%** vs Hybrid 2.9%.
+- **v3+fix is the best graph variant**: recall 0.936 (+1.0 pp over v2), 223 missed examples (−28 vs v2), F1 0.731.
+- The adaptive gap ratio fix (small DB: `min()→max()`) alone recovered **+0.5 pp recall** vs v3 on the same graph.
+- v3 targets (F1 ≥ 0.78, Recall ≥ 0.95) **not yet met** — precision needs improvement on dense-FK DBs.
+- Context size: Graph v3+fix averages **78 tokens** vs Hybrid's 193 (2.5× smaller prompt).
+- Exact match (recall=1 AND precision=1): **Graph v2 21.9%** / v3+fix **20.8%** vs Hybrid 2.9%.
 - Zero-recall examples (complete miss): **0 for all retrievers**.
 
 ---
@@ -50,70 +55,44 @@ All metrics are schema-linking only (no SQL generation).
 
 ### 2.1 Core Set-Membership Metrics
 
-| Metric | Hybrid | Graph v2 | Merge |
-|---|---|---|---|
-| Table Recall | **0.9879** | 0.9246 | 0.9740 |
-| Table Precision | 0.3920 | **0.6221** | 0.4855 |
-| **Table F1** | 0.5613 | **0.7438** | 0.6480 |
-| Column Recall | **0.9912** | 0.9345 | 0.9770 |
-| Column Precision | 0.1054 | **0.1407** | 0.1182 |
-| Column F1 | 0.1905 | **0.2446** | 0.2109 |
-| Perfect recall % | **97.0%** | 83.6% | 93.7% |
-| Exact match % | 2.9% | **21.9%** | 5.5% |
-| Zero recall % | 0% | 0% | 0% |
-| Missed examples | **46** | 251 | 96 |
-| Noisy (>3 extra tables) | 767 | **260** | 363 |
+| Metric | Hybrid | Graph v2 | **Graph v3+fix** | Merge v3+fix |
+|---|---|---|---|---|
+| Table Recall | **0.9879** | 0.9246 | 0.9356 | 0.9720 |
+| Table Precision | 0.3920 | **0.6221** | 0.6000 | 0.4889 |
+| **Table F1** | 0.5613 | **0.7438** | 0.7311 | 0.6506 |
+| Column Recall | **0.9912** | 0.9345 | 0.9450 | 0.9750 |
+| Column Precision | 0.1054 | **0.1407** | 0.1370 | 0.1180 |
+| Column F1 | 0.1905 | **0.2446** | 0.2393 | 0.2106 |
+| Perfect recall % | **97.0%** | 83.6% | 85.5% | 93.4% |
+| Exact match % | 2.9% | **21.9%** | 20.8% | 5.7% |
+| Zero recall % | 0% | 0% | 0% | 0% |
+| Missed examples | **46** | 251 | **223** | 102 |
+| Noisy (>3 extra tables) | 767 | **260** | 279 | 344 |
 
 ### 2.2 Rank-Quality Metrics
 
-| Metric | Hybrid | Graph v2 | Merge |
-|---|---|---|---|
-| NDCG@15 | **0.9332** | 0.8942 | 0.9271 |
-| MRR | **0.9453** | 0.9444 | 0.9443 |
-| Hit@3 | 0.9974 | 0.9967 | 0.9974 |
-| Hit@5 | **1.0000** | 0.9993 | 1.0000 |
+| Metric | Hybrid | Graph v2 | **Graph v3+fix** | Merge v3+fix |
+|---|---|---|---|---|
+| NDCG@15 | **0.9332** | 0.8942 | 0.8956 | 0.9201 |
+| MRR | **0.9453** | 0.9444 | 0.9343 | 0.9361 |
+| Hit@3 | 0.9974 | 0.9967 | 0.9948 | 0.9954 |
+| FK pair recall | **0.9833** | 0.8800 | 0.8992 | 0.9517 |
 
-> All three retrievers find the **first** gold table at almost the same rank (MRR ~0.944–0.945).
-> The NDCG gap reflects that Graph v2 sometimes places the 2nd/3rd gold table lower in the ranked
-> list on multi-table queries, while Hybrid's broad retrieval naturally ranks most gold tables in
-> the top 15.
+> All retrievers find the **first** gold table at almost the same rank (MRR ~0.934–0.945).
+> Graph v3+fix improves FK pair recall by +1.9 pp over v2 (0.899 vs 0.880) — TABLE_FK edges
+> and FK bridge injection helping multi-table queries.
 
-### 2.3 Column-Role Recall
+### 2.3 Context Budget
 
-| Column role | Hybrid | Graph v2 | Merge |
-|---|---|---|---|
-| PK columns | **0.9847** | 0.9012 | 0.9608 |
-| FK columns | **0.9898** | 0.9113 | 0.9729 |
-| Regular columns | **0.9864** | 0.9203 | 0.9661 |
+| Metric | Hybrid | Graph v2 | **Graph v3+fix** | Merge v3+fix |
+|---|---|---|---|---|
+| Avg schema tokens | 193 | **77** | 78 | 106 |
+| FK pair recall | **0.983** | 0.880 | 0.899 | 0.952 |
+| Redundant table ratio | 0.608 | **0.378** | — | — |
+| Contexts >2 000 tokens | 0 | 0 | 0 | 0 |
 
-> Hybrid wins all column roles. The gap is 8–9 pp for PK/FK and 6.6 pp for regular columns.
-> These gaps are a direct consequence of Graph v2's column score filtering (Fix 7) — it prunes
-> columns that scored below threshold, trading recall for column precision (14.1% vs 10.5%).
-
-### 2.4 FK Coverage
-
-| Metric | Hybrid | Graph v2 | Merge |
-|---|---|---|---|
-| FK pair recall | **0.9833** | 0.8800 | 0.9560 |
-| Orphaned FK rate | **0.0110** | 0.0863 | 0.0333 |
-
-> Hybrid wins FK pair recall (+10.3 pp). Graph v2's orphaned FK rate (8.6%) is the residual
-> target — Fix 6 (FK bridge) captured easy cases but multi-hop FK chains still escape PPR in
-> complex schemas.
-
-### 2.5 Context Budget
-
-| Metric | Hybrid | Graph v2 | Merge |
-|---|---|---|---|
-| Avg schema tokens | 193 | **77** | 109 |
-| p25 / p75 / p95 tokens | 111/247/517 | 40/107/168 | 58/135/239 |
-| Token recall | 0.512 | **1.848** | 1.156 |
-| Redundant table ratio | 0.608 | **0.378** | 0.514 |
-| Contexts >2 000 tokens | 0 | 0 | 0 |
-
-> Graph v2 generates **2.5× smaller** schema prompts on average (77 vs 193 tokens).
-> Token recall >1.0 means the gold schema fits entirely within the context window.
-> Hybrid's token recall of 0.512 means 49% of prompt tokens are irrelevant schema.
+> Graph v3+fix generates **2.5× smaller** schema prompts vs Hybrid (78 vs 193 tokens).
+> Merge v3+fix trades +28 tokens (+36%) for +3.6 pp recall over pure Graph.
 
 ---
 
@@ -121,141 +100,112 @@ All metrics are schema-linking only (no SQL generation).
 
 Table F1 by number of gold tables required per query.
 
-| Complexity | #Ex | Hybrid F1 | Graph v2 F1 | Merge F1 | Graph v2 Recall | Graph v2 Prec |
-|---|---|---|---|---|---|---|
-| **1-table** | 364 | 0.362 | **0.636** | 0.461 | 1.000 | 0.467 |
-| **2-table** | 928 | 0.591 | **0.773** | 0.678 | 0.924 | 0.664 |
-| **3-table** | 202 | 0.689 | **0.759** | 0.758 | 0.823 | 0.703 |
-| **4+-table** | 40 | 0.691 | 0.700 | **0.740** | 0.763 | 0.647 |
+| Complexity | #Ex | Hybrid F1 | Graph v2 F1 | **Graph v3+fix F1** | Merge F1 | v3+fix Recall | v3+fix Prec |
+|---|---|---|---|---|---|---|---|
+| **1-table** | 364 | 0.362 | **0.636** | 0.610 | 0.471 | 1.000 | 0.438 |
+| **2-table** | 928 | 0.591 | **0.773** | 0.760 | 0.679 | 0.937 | 0.639 |
+| **3-table** | 202 | 0.689 | 0.759 | **0.762** | 0.755 | 0.843 | 0.695 |
+| **4+-table** | 40 | 0.691 | 0.700 | **0.727** | 0.739 | 0.784 | 0.677 |
 
 Key findings:
 
-- **Graph v2 leads at all complexity levels up to 3 tables.** Precision advantage is largest at
-  1-table (0.467 vs 0.221) — Hybrid's FK expansion retrieves 3–5 tables even for single-table queries.
-- **Merge wins at 4+ tables** (F1 0.740 vs Graph v2's 0.700) — Hybrid's broad recall matters most
-  when many tables must all be found.
-- Graph v2 1-table recall = 1.000 — no gold table is ever missed on single-table queries.
+- **Graph v3+fix leads at 3-table and 4+-table queries** over v2 (+0.3 pp / +2.7 pp F1) — TABLE_FK edges improve multi-hop reach.
+- **Graph v2 still leads at 1-table and 2-table** — FK bridge injection adds noise on simpler queries.
+- **Merge wins 4+-table** (F1 0.739) — Hybrid recall matters when many tables must all be found.
+- 1-table recall = **1.000** for both Graph variants — no gold table ever missed on single-table queries.
 
 ---
 
 ## 4. Difficulty Stratification (BIRD Labels)
 
-| Difficulty | #Ex | Hybrid F1 | Graph v2 F1 | Merge F1 | H NDCG | G NDCG |
+| Difficulty | #Ex | Hybrid F1 | Graph v2 F1 | **Graph v3+fix F1** | Merge F1 | v3+fix NDCG |
 |---|---|---|---|---|---|---|
-| Simple | 925 | 0.507 | **0.717** | 0.609 | 0.936 | 0.908 |
-| Moderate | 464 | 0.631 | **0.779** | 0.698 | 0.929 | 0.884 |
-| Challenging | 145 | 0.655 | **0.778** | 0.717 | 0.932 | 0.841 |
+| Simple | 925 | 0.507 | **0.717** | 0.693 | 0.611 | 0.906 |
+| Moderate | 464 | 0.631 | 0.779 | **0.783** | 0.701 | 0.886 |
+| Challenging | 145 | 0.655 | **0.778** | 0.773 | 0.718 | 0.858 |
 
-- Graph v2 **wins at every difficulty level** (by 6–21 pp F1).
-- Largest gap on **simple queries** (+21 pp) — simple queries most often need only 1 table,
-  where Hybrid's FK blast is most damaging.
-- Challenging queries show the smallest gap (+12 pp) — harder queries are more multi-table,
-  where Hybrid's recall advantage partially compensates.
+- Graph v3+fix **beats v2 on moderate queries** (+0.4 pp) — FK bridge helps medium-complexity joins.
+- Simple queries: v3+fix loses −2.4 pp to v2 — FK bridge adds noise on 1-table simple queries.
+- Challenging queries: v3+fix −0.5 pp vs v2 — broadly equivalent.
 
 ---
 
 ## 5. Per-Database Breakdown
 
-### 5.1 All-Three Comparison
+### 5.1 Graph v3+fix vs v2 Per-Database
 
-| Database | n | H Recall | H Prec | **H F1** | G Recall | G Prec | **G F1** | M Recall | M Prec | **M F1** |
-|---|---|---|---|---|---|---|---|---|---|---|
-| thrombosis_prediction | 163 | 0.998 | 0.656 | 0.792 | 0.917 | 0.836 | **0.875** | 0.982 | 0.666 | 0.793 |
-| california_schools | 89 | 1.000 | 0.672 | 0.804 | 0.876 | 0.835 | **0.855** | 0.966 | 0.706 | **0.816** |
-| card_games | 191 | 0.988 | 0.357 | 0.524 | 0.942 | 0.776 | **0.851** | 0.987 | 0.574 | 0.726 |
-| debit_card_specializing | 64 | 1.000 | 0.384 | 0.555 | 0.904 | 0.698 | **0.788** | 0.984 | 0.428 | 0.596 |
-| european_football_2 | 129 | 0.992 | 0.285 | 0.443 | 0.879 | 0.651 | **0.748** | 0.973 | 0.389 | 0.556 |
-| student_club | 158 | 0.993 | 0.327 | 0.492 | 0.930 | 0.655 | **0.769** | 0.979 | 0.428 | 0.595 |
-| superhero | 129 | 0.992 | 0.455 | 0.623 | 0.989 | 0.614 | **0.757** | 0.996 | 0.600 | 0.749 |
-| financial | 106 | 0.986 | 0.401 | 0.571 | 0.843 | 0.627 | **0.719** | 0.960 | 0.475 | 0.636 |
-| toxicology | 145 | 0.998 | 0.457 | 0.627 | 0.987 | 0.537 | **0.695** | 0.995 | 0.468 | 0.636 |
-| codebase_community | 186 | 0.984 | 0.267 | 0.421 | 0.969 | 0.419 | **0.585** | 0.983 | 0.391 | 0.559 |
-| formula_1 | 174 | 0.954 | 0.208 | 0.341 | 0.877 | 0.356 | **0.506** | 0.914 | 0.290 | 0.440 |
+| Database | n | v2 F1 | **v3+fix F1** | Δ F1 | v3+fix Recall | v3+fix Prec | NDCG | FK Pair | Tokens |
+|---|---|---|---|---|---|---|---|---|---|
+| thrombosis_prediction | 163 | 0.875 | **0.887** | **+0.012** | 0.945 | 0.835 | 0.946 | 0.877 | 47 |
+| debit_card_specializing | 64 | 0.788 | **0.801** | **+0.013** | 0.904 | 0.719 | 0.890 | 0.969 | 29 |
+| student_club | 158 | 0.769 | **0.780** | **+0.011** | 0.959 | 0.657 | 0.935 | 0.918 | 59 |
+| financial | 106 | 0.719 | **0.722** | **+0.002** | 0.846 | 0.630 | 0.815 | 0.729 | 67 |
+| codebase_community | 186 | 0.585 | **0.586** | +0.001 | 0.976 | 0.419 | 0.932 | 0.972 | 110 |
+| california_schools | 89 | **0.855** | 0.851 | −0.005 | 0.916 | 0.794 | 0.908 | 0.854 | 49 |
+| card_games | 191 | **0.851** | 0.839 | −0.012 | 0.947 | 0.753 | 0.921 | 0.942 | 50 |
+| toxicology | 145 | **0.695** | 0.685 | −0.011 | **0.998** | 0.521 | 0.900 | **1.000** | 51 |
+| european_football_2 | 129 | **0.748** | 0.738 | −0.009 | 0.867 | 0.643 | 0.855 | 0.775 | 139 |
+| formula_1 | 174 | **0.506** | 0.467 | **−0.039** | 0.887 | 0.317 | 0.761 | 0.825 | 132 |
+| superhero | 129 | **0.757** | 0.644 | **−0.114** | 0.989 | 0.477 | 0.970 | 0.984 | 87 |
 
-Graph v2 achieves the best F1 on **10/11 databases**. The only near-tie is `thrombosis_prediction`
-(Graph 0.875 vs Hybrid 0.792 — Graph wins there too, by 8 pp).
+Notable changes:
+- **Winners** (v3+fix > v2): thrombosis_prediction, debit_card_specializing, student_club, financial — all medium FK-depth schemas where TABLE_FK edges help.
+- **Regressions**: superhero (−11.4 pp F1) — FK bridge injects `hero_attribute`/`hero_power` tables excessively (+22/+26× over-retrieval). formula_1 (−3.9 pp) — FK flooding worse with new TABLE_FK shortcuts.
 
-### 5.2 Graph v2 Deep Dive per Database
+### 5.2 All-Retriever Comparison
 
-| Database | n | Recall | Prec | F1 | FK Pair R | Avg Tokens | Orphaned FK |
-|---|---|---|---|---|---|---|---|
-| thrombosis_prediction | 163 | 0.917 | 0.836 | **0.875** | 0.837 | 50 | 0.000 |
-| california_schools | 89 | 0.876 | 0.835 | **0.855** | 0.775 | 47 | 0.000 |
-| card_games | 191 | 0.942 | 0.776 | **0.851** | 0.932 | 52 | 0.000 |
-| debit_card_specializing | 64 | 0.904 | 0.698 | **0.788** | 0.984 | 30 | 0.000 |
-| european_football_2 | 129 | 0.879 | 0.651 | **0.748** | 0.798 | 137 | 0.000 |
-| student_club | 158 | 0.930 | 0.655 | **0.769** | 0.864 | 58 | 0.000 |
-| superhero | 129 | 0.989 | 0.614 | **0.757** | 0.984 | 80 | 0.000 |
-| financial | 106 | 0.843 | 0.627 | **0.719** | 0.724 | 66 | 0.000 |
-| toxicology | 145 | 0.987 | 0.537 | **0.695** | 0.982 | 50 | 0.000 |
-| codebase_community | 186 | 0.969 | 0.419 | **0.585** | 0.964 | 109 | 0.000 |
-| formula_1 | 174 | 0.877 | 0.356 | **0.506** | 0.797 | 124 | 0.000 |
-
-Notable patterns:
-
-- **Best F1 cluster** (thrombosis, california_schools, card_games — F1 ≥ 0.85): Small-to-medium
-  schemas with clear semantic clusters. PPR navigates cleanly; LLM enrichment bridged key synonym gaps.
-- **Lowest F1 cluster** (formula_1, codebase_community — F1 ≤ 0.59): Both are densely FK-connected
-  with many lookup tables. FK flooding via `SAME_TABLE` and `CO_JOIN` edges spills into extra-table counts.
-- **Zero orphaned FK rate** across all 11 databases — Fix 6 (FK bridge) works as intended.
-
-### 5.3 Per-Database NDCG Comparison
-
-| Database | n | Hybrid NDCG | Graph v2 NDCG | Merge NDCG |
-|---|---|---|---|---|
-| california_schools | 89 | 0.894 | 0.883 | **0.939** |
-| card_games | 191 | 0.958 | 0.919 | **0.957** |
-| codebase_community | 186 | 0.924 | 0.930 | **0.933** |
-| debit_card_specializing | 64 | 0.952 | 0.892 | 0.940 |
-| european_football_2 | 129 | **0.940** | 0.869 | 0.920 |
-| financial | 106 | **0.922** | 0.822 | 0.905 |
-| formula_1 | 174 | 0.832 | 0.790 | **0.808** |
-| student_club | 158 | **0.958** | 0.919 | 0.948 |
-| superhero | 129 | 0.974 | 0.966 | **0.973** |
-| thrombosis_prediction | 163 | 0.948 | 0.927 | **0.969** |
-| toxicology | 145 | **0.972** | 0.896 | 0.922 |
+| Database | n | H Recall | **H F1** | G v2 Recall | **G v2 F1** | G v3+fix Recall | **G v3+fix F1** | M Recall | **M F1** |
+|---|---|---|---|---|---|---|---|---|---|
+| thrombosis_prediction | 163 | 0.998 | 0.792 | 0.917 | **0.875** | 0.945 | **0.887** | 0.982 | 0.793 |
+| california_schools | 89 | 1.000 | 0.804 | 0.876 | **0.855** | 0.916 | 0.851 | 0.966 | 0.816 |
+| card_games | 191 | 0.988 | 0.524 | 0.942 | **0.851** | 0.947 | 0.839 | 0.987 | 0.726 |
+| debit_card_specializing | 64 | 1.000 | 0.555 | 0.904 | 0.788 | 0.904 | **0.801** | 0.984 | 0.596 |
+| european_football_2 | 129 | 0.992 | 0.443 | 0.879 | **0.748** | 0.867 | 0.738 | 0.973 | 0.556 |
+| student_club | 158 | 0.993 | 0.492 | 0.930 | 0.769 | 0.959 | **0.780** | 0.979 | 0.595 |
+| superhero | 129 | 0.992 | 0.623 | **0.989** | **0.757** | 0.989 | 0.644 | 0.996 | 0.749 |
+| financial | 106 | 0.986 | 0.571 | 0.843 | 0.719 | 0.846 | **0.722** | 0.960 | 0.636 |
+| toxicology | 145 | 0.998 | 0.627 | 0.987 | **0.695** | **0.998** | 0.685 | 0.995 | 0.636 |
+| codebase_community | 186 | 0.984 | 0.421 | 0.969 | **0.585** | 0.976 | **0.586** | 0.983 | 0.559 |
+| formula_1 | 174 | 0.954 | 0.341 | 0.877 | **0.506** | 0.887 | 0.467 | 0.914 | 0.440 |
 
 ---
 
-## 6. Most Missed and Over-Retrieved Tables (Graph v2)
+## 6. Most Missed and Over-Retrieved Tables (Graph v3+fix)
 
 ### 6.1 Most Missed Tables
 
-| Table | Times missed | Root cause |
-|---|---|---|
-| `formula_1.races` | 28× | PPR cascade: `results → drivers` path taken; `races` hub skipped |
-| `thrombosis_prediction.patient` | 24× | Shared FK hub; PPR seeds on examination/laboratory columns |
-| `financial.account` | 23× | Implicit reference — queries mention transactions/loans, not accounts |
-| `california_schools.schools` | 14× | Vague phrasing ("school info") vs specific `frpm`/`satscores` seeds |
-| `european_football_2.player` | 12× | "player" matched to `player_attributes`; hub table under-seeded |
-| `student_club.member` | 12× | Referred to implicitly via budget/event tables |
-| `european_football_2.team` | 11× | Multi-hop chain: match → player_attributes → player → team |
-| `formula_1.drivers` | 10× | `results` column seeds PPR, but `drivers` hub falls below threshold |
-| `financial.loan` | 9× | Queried via `account` or `disp` FK columns |
-| `card_games.cards` | 9× | Queried via attributes on related tables |
+| Table | v3+fix misses | v2 misses | Δ | Root cause |
+|---|---|---|---|---|
+| `financial.account` | 22× | 23× | −1 | Implicit reference — queries mention transactions/loans |
+| `thrombosis_prediction.patient` | 19× | 24× | **−5** ✅ | FK hub; TABLE_FK now helps propagate |
+| `formula_1.races` | 17× | 28× | **−11** ✅ | TABLE_FK shortcut improved PPR reach |
+| `european_football_2.player` | 15× | 12× | +3 ❌ | Now over-seeded from player_attributes FK |
+| `formula_1.drivers` | 13× | 10× | +3 ❌ | TABLE_FK flooding → score diluted |
+| `european_football_2.team` | 11× | 11× | 0 | Multi-hop chain still too deep |
+| `student_club.member` | 11× | 12× | −1 | Marginal improvement |
+| `california_schools.schools` | 9× | 14× | **−5** ✅ | Adaptive gap fix (small DB) recovered these |
+| `financial.loan` | 9× | 9× | 0 | Queried via account/disp FK columns |
+| `card_games.cards` | 9× | 9× | 0 | — |
 
-**Pattern**: Top misses are all **hub/bridge tables** connecting chains of entities. PPR seeds
-on leaf-side columns and propagates upward, but junction tables receive less personalization mass
-and fall below the score threshold.
+**Improvements**: formula_1.races (−11), thrombosis_prediction.patient (−5), california_schools.schools (−5)
+**Regressions**: european_football_2.player (+3), formula_1.drivers (+3) — TABLE_FK edges created new confusion paths
 
 ### 6.2 Most Over-Retrieved Tables
 
-| Table | Times over-retrieved | Root cause |
-|---|---|---|
-| `codebase_community.comments` | 121× | Dense `CO_JOIN` edges to `posts`/`users` (Layer 3) |
-| `codebase_community.posthistory` | 120× | Same — statistical layer pulls it in |
-| `formula_1.laptimes` | 99× | FK edge from `results`; PPR flood from `races` seed |
-| `codebase_community.votes` | 95× | Dense co-join cluster |
-| `codebase_community.posts` | 86× | Hub of entire codebase schema |
-| `formula_1.driverstandings` | 85× | FK chain: `races → driverstandings` |
-| `formula_1.pitstops` | 83× | FK chain: `races → pitstops` |
-| `formula_1.constructorstandings` | 73× | FK chain continuation |
-| `formula_1.constructorresults` | 70× | FK chain continuation |
-| `toxicology.bond` | 68× | Ring-topology; all nodes reachable within 2 hops |
+| Table | v3+fix | v2 | Δ | Root cause |
+|---|---|---|---|---|
+| `codebase_community.posthistory` | 132× | 120× | +12 | Dense CO_JOIN cluster — still over-propagating |
+| `codebase_community.comments` | 111× | 121× | −10 | — |
+| `formula_1.constructorresults` | 100× | 70× | **+30** ❌ | New TABLE_FK shortcuts from results/races |
+| `formula_1.constructorstandings` | 91× | 73× | **+18** ❌ | Same FK flood |
+| `superhero.hero_attribute` | 85× | 63× | **+22** ❌ | TABLE_FK from superhero → attributes |
+| `superhero.hero_power` | 81× | 55× | **+26** ❌ | Same — superhero star topology |
+| `codebase_community.votes` | 87× | 95× | −8 | — |
+| `formula_1.laptimes` | 88× | 99× | −11 | — |
+| `toxicology.bond` | 76× | 68× | +8 | Ring-topology still problematic |
 
-**Pattern**: Both `formula_1` and `codebase_community` have star/ring FK topologies where PPR
-propagates broadly. `codebase_community`'s Layer-3 `CO_JOIN` edges make its tables
-indistinguishable — training SQL joins posts, comments, votes, and posthistory together frequently.
+**Main regression source**: `formula_1` and `superhero` — star FK topologies where new TABLE_FK
+shortcuts amplify PPR flooding to all leaf tables.
 
 ---
 
@@ -289,30 +239,25 @@ and `schema_filter.py`.
 
 ## 8. Retriever Characteristic Profiles
 
-| Dimension | HybridRetriever | GraphRetriever v2 | Graph+Hybrid Merge |
-|---|---|---|---|
-| **Table F1** | 0.561 | **0.744** | 0.648 |
-| **Table Recall** | **0.988** | 0.925 | 0.974 |
-| **Table Precision** | 0.392 | **0.622** | 0.486 |
-| **Exact match** | 2.9% | **21.9%** | 5.5% |
-| **Avg prompt tokens** | 193 | **77** | 109 |
-| **FK pair recall** | **0.983** | 0.880 | 0.956 |
-| **Noisy examples** | 767 | **260** | 363 |
-| **NDCG@15** | **0.933** | 0.894 | 0.927 |
-| **Consistency (recall std)** | **0.071** | 0.176 | 0.104 |
-| Zero-recall examples | 0 | 0 | 0 |
+| Dimension | HybridRetriever | GraphRetriever v2 | **Graph v3+fix** | Graph+Hybrid Merge v3 |
+|---|---|---|---|---|
+| **Table F1** | 0.561 | **0.744** | 0.731 | 0.651 |
+| **Table Recall** | **0.988** | 0.925 | 0.936 | 0.972 |
+| **Table Precision** | 0.392 | **0.622** | 0.600 | 0.489 |
+| **Exact match** | 2.9% | **21.9%** | 20.8% | 5.7% |
+| **Avg prompt tokens** | 193 | **77** | 78 | 106 |
+| **FK pair recall** | **0.983** | 0.880 | 0.899 | 0.952 |
+| **Missed examples** | **46** | 251 | **223** | 102 |
+| **Noisy examples** | 767 | **260** | 279 | 344 |
+| **NDCG@15** | **0.933** | 0.894 | 0.896 | 0.920 |
+| Zero-recall examples | 0 | 0 | 0 | 0 |
 
 **When to use each:**
 
-- **GraphRetriever v2** — best F1 overall, smallest prompts, highest exact-match rate. Preferred
-  when LLM context budget matters. Best on schemas with clear semantic clusters (card_games,
-  thrombosis_prediction, superhero).
-- **HybridRetriever** — best recall and FK pair recall. Preferred when missing any gold table is
-  catastrophic and prompt size is not a concern. Degrades badly on large/dense schemas (formula_1,
-  codebase_community) where FK expansion floods context.
-- **Graph+Hybrid merge** — best tradeoff for production when schemas vary widely. Recall 97.4%,
-  precision 48.6%, 43% fewer noisy examples than Hybrid. Use when you need high recall but cannot
-  afford Hybrid's context explosion.
+- **GraphRetriever v3+fix** — best recall among graph variants (0.936), smallest prompts (78 tokens), 223 missed examples (−28 vs v2). Best default choice. Preferred for schemas with medium FK depth (thrombosis, financial, student_club).
+- **GraphRetriever v2** — still best F1 (0.744) and exact match (21.9%) due to tighter precision. Use when over-retrieval is more costly than recall. Best on schemas with clear semantic clusters (card_games, superhero).
+- **HybridRetriever** — best recall (0.988) and FK pair recall (0.983). Use when missing any gold table is catastrophic and prompt size is not a constraint. Degrades on large/dense schemas (formula_1, codebase_community).
+- **Graph+Hybrid merge v3** — best tradeoff for production when schemas vary widely. Recall 97.2%, 43% fewer noisy examples than Hybrid, 45% fewer tokens. Use when high recall is required but Hybrid's context explosion is unacceptable.
 
 ---
 
@@ -476,6 +421,7 @@ The fundamental tension in v3: **every new edge or bridge table improves recall 
 | **Graph v2 — 8-fix batch** | **2026-03** | **GraphRetriever v2** | **0.744** | **0.622** | **0.925** | **77** | **All 8 fixes, 1 534 ex** |
 | Graph v3 — structural+runtime | 2026-03 | GraphRetriever v3 | 0.729 | 0.599 | 0.931 | 80 | TABLE_FK, INFERRED_FK, CO_JOIN↓, FK bridge, adaptive gap |
 | Graph v3b — +Layer 2b edges | 2026-03 | GraphRetriever v3b | 0.723 | 0.590 | 0.932 | 77 | +4.3K EMBEDDING_SIMILAR, +42K SYNONYM_MATCH |
+| **Graph v3+fix — adaptive gap fix** | **2026-03-17** | **GraphRetriever v3+fix** | **0.731** | **0.600** | **0.936** | **78** | **Reversed small-DB gap ratio (min→max). Best recall of all graph variants. 223 missed (−28 vs v2).** |
 
 ---
 
