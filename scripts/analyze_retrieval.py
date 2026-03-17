@@ -52,9 +52,9 @@ from src.data_parser import get_parser
 from src.schema.schema_chunker import SchemaChunker
 from src.schema.schema_indexer import SchemaIndexer
 from src.retrieval.hybrid_retriever import HybridRetriever
-from src.retrieval.bidirectional_linker import BidirectionalLinker
-from src.retrieval.query_augmentor import QueryAugmentor
-from src.retrieval.schema_filter import SchemaFilter
+from src.retrieval.utils.bidirectional_linker import BidirectionalLinker
+from src.pre_retrieval.query_augmentor import QueryAugmentor
+from src.retrieval.utils.schema_filter import SchemaFilter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -445,7 +445,7 @@ def main():
     # ── ValueScanner (v3 seed boosting) ────────────────────────────────────────
     value_scanner = None
     if args.value_scan and use_graph:
-        from src.retrieval.value_scanner import ValueScanner
+        from src.pre_retrieval.value_scanner import ValueScanner
         value_scanner = ValueScanner(max_values_per_col=500, top_k=5, min_score=0.75)
         logger.info("ValueScanner enabled for seed boosting")
 

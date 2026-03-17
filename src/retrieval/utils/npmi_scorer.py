@@ -18,7 +18,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from ..schema.schema_chunker import SchemaChunk
+from ...schema.schema_chunker import SchemaChunk
 
 logger = logging.getLogger(__name__)
 

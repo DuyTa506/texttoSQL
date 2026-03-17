@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from src.schema.models import Column, Database, Table
-from src.retrieval.value_scanner import ValueMatch, ValueScanner
+from src.pre_retrieval.value_scanner import ValueMatch, ValueScanner
 
 
 # ---------------------------------------------------------------------------

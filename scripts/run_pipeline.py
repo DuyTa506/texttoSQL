@@ -46,11 +46,11 @@ from src.data_parser import get_parser
 from src.schema.schema_chunker import SchemaChunker
 from src.schema.schema_indexer import SchemaIndexer
 from src.evaluation.metrics import compute_metrics, execution_accuracy, exact_match, schema_recall, schema_precision
-from src.retrieval.bidirectional_linker import BidirectionalLinker
+from src.retrieval.utils.bidirectional_linker import BidirectionalLinker
 from src.retrieval.hybrid_retriever import HybridRetriever
-from src.retrieval.npmi_scorer import NPMIScorer
-from src.retrieval.query_augmentor import QueryAugmentor
-from src.retrieval.schema_filter import SchemaFilter
+from src.retrieval.utils.npmi_scorer import NPMIScorer
+from src.pre_retrieval.query_augmentor import QueryAugmentor
+from src.retrieval.utils.schema_filter import SchemaFilter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -266,7 +266,7 @@ def _build_value_scanner(pre_cfg: dict):
     vs_cfg = pre_cfg.get("value_scan", {})
     if not vs_cfg.get("enabled", False):
         return None
-    from src.retrieval.value_scanner import ValueScanner
+    from src.pre_retrieval.value_scanner import ValueScanner
     logger.info("ValueScanner enabled (max_values=%d, top_k=%d)",
                 vs_cfg.get("max_values", 500), vs_cfg.get("top_k", 5))
     return ValueScanner(
@@ -281,7 +281,7 @@ def _build_decomposer(pre_cfg: dict):
     dec_cfg = pre_cfg.get("decomposition", {})
     if not dec_cfg.get("enabled", False):
         return None
-    from src.retrieval.question_decomposer import QuestionDecomposer
+    from src.pre_retrieval.question_decomposer import QuestionDecomposer
     logger.info("QuestionDecomposer enabled (threshold=%.2f)",
                 dec_cfg.get("complexity_threshold", 0.6))
     return QuestionDecomposer(

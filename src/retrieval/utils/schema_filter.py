@@ -4,8 +4,8 @@ Schema Filter – selects top-K schema elements and formats them for the LLM pro
 
 from __future__ import annotations
 
-from ..schema.models import Database
-from ..schema.schema_chunker import SchemaChunk
+from ...schema.models import Database
+from ...schema.schema_chunker import SchemaChunk
 
 
 class SchemaFilter:

@@ -181,10 +181,10 @@ def main(args):
     from src.schema.schema_indexer import SchemaIndexer
     from src.data_parser import get_parser
     from src.post.sql_executor import ErrorType, SQLExecutor
-    from src.retrieval.bidirectional_linker import BidirectionalLinker
+    from src.retrieval.utils.bidirectional_linker import BidirectionalLinker
     from src.retrieval.hybrid_retriever import HybridRetriever
-    from src.retrieval.query_augmentor import QueryAugmentor
-    from src.retrieval.schema_filter import SchemaFilter
+    from src.pre_retrieval.query_augmentor import QueryAugmentor
+    from src.retrieval.utils.schema_filter import SchemaFilter
 
     logger.info("Loading dataset from: %s", args.data_path)
     adapter = get_parser("spider_v1")

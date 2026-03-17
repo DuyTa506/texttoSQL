@@ -10,8 +10,8 @@ Implements the table-first → FK-expansion strategy from RSL-SQL:
 from __future__ import annotations
 
 import logging
-from ..schema.models import Database
-from ..schema.schema_chunker import SchemaChunk
+from ...schema.models import Database
+from ...schema.schema_chunker import SchemaChunk
 
 logger = logging.getLogger(__name__)
 

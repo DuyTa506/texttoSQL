@@ -11,7 +11,7 @@ from rank_bm25 import BM25Okapi
 from ..schema.schema_chunker import SchemaChunk
 from ..schema.schema_indexer import SchemaIndexer
 from .base_retriever import BaseRetriever
-from .npmi_scorer import NPMIScorer
+from .utils import NPMIScorer
 
 logger = logging.getLogger(__name__)
 

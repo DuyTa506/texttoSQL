@@ -10,7 +10,7 @@ import pytest
 # Add project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.retrieval.npmi_scorer import NPMIScorer
+from src.retrieval.utils.npmi_scorer import NPMIScorer
 from src.schema.schema_chunker import SchemaChunk
 
 

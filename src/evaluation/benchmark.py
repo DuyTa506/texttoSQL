@@ -33,7 +33,7 @@ from ..evaluation.metrics import (
     schema_recall,
 )
 from ..generation.inference import SQLInference
-from ..retrieval.schema_filter import SchemaFilter
+from ..retrieval.utils.schema_filter import SchemaFilter
 
 logger = logging.getLogger(__name__)
 
