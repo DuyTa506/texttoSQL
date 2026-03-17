@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from ..schema.models import Database
+from src.schema import Database
 
 logger = logging.getLogger(__name__)
 

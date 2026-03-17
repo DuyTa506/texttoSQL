@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from ..schema.models import Database
+from src.schema import Database
 
 
 class QueryAugmentor:

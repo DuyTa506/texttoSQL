@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.table import Table as RichTable
 from tqdm import tqdm
 
-from ..schema.models import Database, Example
+from src.schema import Database, Example
 from ..evaluation.metrics import (
     compute_metrics,
     exact_match,

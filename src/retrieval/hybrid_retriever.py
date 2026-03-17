@@ -8,8 +8,7 @@ from __future__ import annotations
 import logging
 from rank_bm25 import BM25Okapi
 
-from ..schema.schema_chunker import SchemaChunk
-from ..schema.schema_indexer import SchemaIndexer
+from src.schema import SchemaChunk, SchemaIndexer
 from .base_retriever import BaseRetriever
 from .utils import NPMIScorer
 

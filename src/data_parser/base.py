@@ -13,7 +13,7 @@ import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from ..schema.models import Column, Database, Example, ForeignKey, Table
+from src.schema import Column, Database, Example, ForeignKey, Table
 
 logger = logging.getLogger(__name__)
 

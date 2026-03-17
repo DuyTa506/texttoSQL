@@ -11,7 +11,7 @@ import json
 import logging
 from pathlib import Path
 
-from ..schema.models import Database, Example
+from src.schema import Database, Example
 
 from .base import BaseParser
 
