@@ -459,21 +459,9 @@ def _build_messages(
 
 
 def _messages_to_chatml(messages: list[dict]) -> str:
-    """
-    Convert a messages list to a ChatML string for local Qwen3 models.
-
-    Format:
-        <|im_start|>system
-        {content}<|im_end|>
-        <|im_start|>user
-        {content}<|im_end|>
-        <|im_start|>assistant
-    """
-    parts = []
-    for msg in messages:
-        parts.append(f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>")
-    parts.append("<|im_start|>assistant")
-    return "\n".join(parts)
+    """Convert messages list to ChatML string. Delegates to shared llms.chat_format."""
+    from src.llms.chat_format import messages_to_chatml
+    return messages_to_chatml(messages)
 
 
 def _parse_output(raw: str) -> dict:

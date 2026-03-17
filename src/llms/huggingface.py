@@ -213,28 +213,5 @@ class HuggingFaceLLM(BaseLLM):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_DEFAULT_HF_SYSTEM_PROMPT = (
-    "You are an expert SQL assistant. "
-    "Given a database schema and a natural-language question, "
-    "generate a correct SQL query. "
-    "Always wrap your final SQL in a ```sql ... ``` code block."
-)
-
-
-def _build_chatml(user_prompt: str, system_prompt: str | None = None) -> str:
-    """
-    Build a ChatML-formatted prompt string for Qwen3 and compatible models.
-
-    Format:
-        <|im_start|>system
-        {system_prompt}<|im_end|>
-        <|im_start|>user
-        {user_prompt}<|im_end|>
-        <|im_start|>assistant
-    """
-    sys = system_prompt or _DEFAULT_HF_SYSTEM_PROMPT
-    return (
-        f"<|im_start|>system\n{sys}<|im_end|>\n"
-        f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
+from src.llms.chat_format import DEFAULT_SYSTEM_PROMPT as _DEFAULT_HF_SYSTEM_PROMPT
+from src.llms.chat_format import build_chatml as _build_chatml

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+from src.shared.sqlite_utils import safe_execute
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,16 +61,14 @@ _SYNTAX_MARKERS = (
 )
 
 
-def _classify_operational_error(msg: str) -> tuple[ErrorType, str]:
-    """Classify an sqlite3.OperationalError message into an ErrorType."""
+def _classify_error(msg: str) -> tuple[ErrorType, str]:
+    """Classify any execution error message string into an ErrorType."""
     msg_lower = msg.lower()
 
-    m = _NO_SUCH_TABLE_RE.search(msg)
-    if m:
+    if _NO_SUCH_TABLE_RE.search(msg):
         return ErrorType.NO_SUCH_TABLE, msg
 
-    m = _NO_SUCH_COLUMN_RE.search(msg)
-    if m:
+    if _NO_SUCH_COLUMN_RE.search(msg):
         return ErrorType.NO_SUCH_COLUMN, msg
 
     if any(marker in msg_lower for marker in _SYNTAX_MARKERS):
@@ -135,78 +135,66 @@ class SQLExecutor:
                 error_message=f"Database file not found for db_id='{db_id}'",
             )
 
-        try:
-            conn = sqlite3.connect(str(db_path))
-            conn.execute("PRAGMA read_uncommitted = true")
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            conn.close()
+        rows, exec_err = safe_execute(db_path, sql)
 
-            if len(rows) == 0:
-                # Check if gold also returns empty (then it's a match)
-                if gold_sql is not None:
-                    gold_result = self._run_gold(gold_sql, db_path)
-                    if gold_result is not None and len(gold_result) == 0:
-                        return ExecutionResult(
-                            sql=sql,
-                            error_type=ErrorType.SUCCESS,
-                            result_rows=rows,
-                            row_count=0,
-                        )
-                return ExecutionResult(
-                    sql=sql,
-                    error_type=ErrorType.EMPTY_RESULT,
-                    result_rows=rows,
-                    row_count=0,
-                )
-
-            # If gold provided: compare result sets
-            if gold_sql is not None:
-                gold_rows = self._run_gold(gold_sql, db_path)
-                if gold_rows is not None:
-                    pred_set = set(map(tuple, rows))
-                    gold_set = set(map(tuple, gold_rows))
-                    if pred_set == gold_set:
-                        return ExecutionResult(
-                            sql=sql,
-                            error_type=ErrorType.SUCCESS,
-                            result_rows=rows,
-                            row_count=len(rows),
-                        )
-                    else:
-                        return ExecutionResult(
-                            sql=sql,
-                            error_type=ErrorType.WRONG_RESULT,
-                            error_message=(
-                                f"Result mismatch: got {len(rows)} rows, "
-                                f"gold has {len(gold_rows)} rows"
-                            ),
-                            result_rows=rows,
-                            row_count=len(rows),
-                        )
-
-            # No gold provided: execution succeeded
-            return ExecutionResult(
-                sql=sql,
-                error_type=ErrorType.SUCCESS,
-                result_rows=rows,
-                row_count=len(rows),
-            )
-
-        except sqlite3.OperationalError as e:
-            error_type, error_msg = _classify_operational_error(str(e))
+        if exec_err is not None:
+            error_type, error_msg = _classify_error(exec_err)
             return ExecutionResult(
                 sql=sql,
                 error_type=error_type,
                 error_message=error_msg,
             )
-        except Exception as e:
+
+        if len(rows) == 0:
+            # Check if gold also returns empty (then it's a match)
+            if gold_sql is not None:
+                gold_result = self._run_gold(gold_sql, db_path)
+                if gold_result is not None and len(gold_result) == 0:
+                    return ExecutionResult(
+                        sql=sql,
+                        error_type=ErrorType.SUCCESS,
+                        result_rows=rows,
+                        row_count=0,
+                    )
             return ExecutionResult(
                 sql=sql,
-                error_type=ErrorType.EXECUTION_ERROR,
-                error_message=str(e),
+                error_type=ErrorType.EMPTY_RESULT,
+                result_rows=rows,
+                row_count=0,
             )
+
+        # If gold provided: compare result sets
+        if gold_sql is not None:
+            gold_rows = self._run_gold(gold_sql, db_path)
+            if gold_rows is not None:
+                pred_set = set(map(tuple, rows))
+                gold_set = set(map(tuple, gold_rows))
+                if pred_set == gold_set:
+                    return ExecutionResult(
+                        sql=sql,
+                        error_type=ErrorType.SUCCESS,
+                        result_rows=rows,
+                        row_count=len(rows),
+                    )
+                else:
+                    return ExecutionResult(
+                        sql=sql,
+                        error_type=ErrorType.WRONG_RESULT,
+                        error_message=(
+                            f"Result mismatch: got {len(rows)} rows, "
+                            f"gold has {len(gold_rows)} rows"
+                        ),
+                        result_rows=rows,
+                        row_count=len(rows),
+                    )
+
+        # No gold provided: execution succeeded
+        return ExecutionResult(
+            sql=sql,
+            error_type=ErrorType.SUCCESS,
+            result_rows=rows,
+            row_count=len(rows),
+        )
 
     # ---- helpers ------------------------------------------------------------
 
@@ -226,14 +214,8 @@ class SQLExecutor:
     @staticmethod
     def _run_gold(gold_sql: str, db_path: Path) -> list | None:
         """Execute gold SQL and return rows, or None on error."""
-        try:
-            conn = sqlite3.connect(str(db_path))
-            conn.execute("PRAGMA read_uncommitted = true")
-            cursor = conn.cursor()
-            cursor.execute(gold_sql)
-            rows = cursor.fetchall()
-            conn.close()
-            return rows
-        except Exception as e:
-            logger.debug("Gold SQL execution error: %s", e)
+        rows, err = safe_execute(db_path, gold_sql)
+        if err:
+            logger.debug("Gold SQL execution error: %s", err)
             return None
+        return rows

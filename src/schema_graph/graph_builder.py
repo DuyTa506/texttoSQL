@@ -345,7 +345,47 @@ class SchemaGraph:
         list[tuple[KGNode, float]]
             Pairs of (schema node, PPR score), sorted by score descending.
         """
-        # ── Candidate nodes: ChromaDB ANN (fast) or linear scan (fallback) ──────
+        scores = self._get_entry_points(
+            query_embedding,
+            db_id=db_id,
+            top_m=top_m,
+            synonym_tokens=synonym_tokens,
+            synonym_boost=synonym_boost,
+            max_nodes=max_nodes,
+        )
+        # _get_entry_points returns early fallback tuples when no embeddings found
+        if scores is None:
+            fallback = [
+                attrs["data"]
+                for _, attrs in self.G.nodes(data=True)
+                if "data" in attrs
+                and attrs["data"].node_type in (NodeType.COLUMN, NodeType.TABLE)
+                and (db_id is None or attrs["data"].db_id == db_id)
+            ]
+            return [(n, 0.0) for n in fallback[:max_nodes]]
+
+        self._merge_value_boosts(scores, value_matched_nodes)
+        personalization = self._build_personalization(scores, top_m)
+        ppr_scores = self._run_ppr(personalization, db_id=db_id, alpha=alpha, max_iter=max_iter, fallback_scores=scores)
+        return self._filter_and_sort(ppr_scores, db_id=db_id, score_threshold=score_threshold, max_nodes=max_nodes)
+
+    # ── PPR phase helpers ──────────────────────────────────────────────────────
+
+    def _get_entry_points(
+        self,
+        query_embedding: np.ndarray,
+        *,
+        db_id: str | None,
+        top_m: int,
+        synonym_tokens: set[str] | None,
+        synonym_boost: float,
+        max_nodes: int,
+    ) -> dict[str, float] | None:
+        """Step 1 — compute cosine entry-point scores via ChromaDB or linear scan.
+
+        Returns a ``{node_id → score}`` dict, or ``None`` when no embedded nodes
+        are found at all (caller should return name-only fallback).
+        """
         if self._chroma_collection is not None:
             scores = self._chroma_entry_points(
                 query_embedding,
@@ -355,7 +395,6 @@ class SchemaGraph:
                 synonym_boost=synonym_boost,
             )
             if not scores:
-                # ChromaDB returned nothing (empty collection for this db_id)
                 logger.warning(
                     "ChromaDB entry-point query returned no results%s — "
                     "falling back to linear scan.",
@@ -369,7 +408,6 @@ class SchemaGraph:
                     synonym_boost=synonym_boost,
                 )
         else:
-            # Linear numpy cosine scan (original path, used when no Chroma attached)
             scores = self._linear_entry_points(
                 query_embedding,
                 db_id=db_id,
@@ -384,37 +422,47 @@ class SchemaGraph:
                 f" for db_id={db_id}" if db_id else "",
                 max_nodes,
             )
-            fallback = [
-                attrs["data"]
-                for _, attrs in self.G.nodes(data=True)
-                if "data" in attrs
-                and attrs["data"].node_type in (NodeType.COLUMN, NodeType.TABLE)
-                and (db_id is None or attrs["data"].db_id == db_id)
-            ]
-            return [(n, 0.0) for n in fallback[:max_nodes]]
+            return None
 
-        # ── Step 2b (v3): Merge value-based seed boosts ──────────────────────
-        if value_matched_nodes:
-            for nid, boost in value_matched_nodes.items():
-                if nid in scores:
-                    scores[nid] = min(scores[nid] + boost, 1.0)
-                else:
-                    scores[nid] = boost
+        return scores
 
-        # ── Step 3: Seed nodes → personalization dict ─────────────────────────
+    @staticmethod
+    def _merge_value_boosts(
+        scores: dict[str, float],
+        value_matched_nodes: dict[str, float] | None,
+    ) -> None:
+        """Step 2b — merge ValueScanner cell-value boosts into entry-point scores in-place."""
+        if not value_matched_nodes:
+            return
+        for nid, boost in value_matched_nodes.items():
+            scores[nid] = min(scores.get(nid, 0.0) + boost, 1.0)
+
+    @staticmethod
+    def _build_personalization(
+        scores: dict[str, float],
+        top_m: int,
+    ) -> dict[str, float]:
+        """Step 3 — build the normalized PPR personalization vector from top-M seeds."""
         sorted_seeds = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         seed_ids = [nid for nid, _ in sorted_seeds[:top_m]]
+        raw = {nid: max(scores[nid], 1e-9) for nid in seed_ids}
+        total = sum(raw.values())
+        return {nid: s / total for nid, s in raw.items()}
 
-        # Personalization vector: sparse dict, proportional to cosine scores.
-        # nx.pagerank accepts a subset of nodes — unmapped nodes get zero.
-        raw_seed_scores = {nid: max(scores[nid], 1e-9) for nid in seed_ids}
-        total = sum(raw_seed_scores.values())
-        personalization = {nid: s / total for nid, s in raw_seed_scores.items()}
+    def _run_ppr(
+        self,
+        personalization: dict[str, float],
+        *,
+        db_id: str | None,
+        alpha: float,
+        max_iter: int,
+        fallback_scores: dict[str, float],
+    ) -> dict[str, float]:
+        """Step 4 — run Personalized PageRank on the per-DB subgraph.
 
-        # ── Step 4: Personalized PageRank via NetworkX ────────────────────────
-        # Fix 5: Run PPR on a per-DB subgraph view to prevent probability-mass
-        # leakage into other databases' nodes.  G.subgraph() returns a live view
-        # (no data copy, O(1) construction).
+        Returns a ``{node_id → ppr_score}`` dict.
+        Falls back to cosine seed scores if PPR fails to converge.
+        """
         if db_id is not None:
             db_node_ids = [
                 nid for nid, attrs in self.G.nodes(data=True)
@@ -425,7 +473,7 @@ class SchemaGraph:
             run_graph = self.G
 
         try:
-            ppr_scores: dict[str, float] = nx.pagerank(
+            return nx.pagerank(
                 run_graph,
                 alpha=alpha,
                 personalization=personalization,
@@ -434,15 +482,22 @@ class SchemaGraph:
                 weight="weight",
             )
         except nx.PowerIterationFailedConvergence:
-            # Fall back to seed scores if PPR doesn't converge
             logger.warning(
                 "PPR did not converge (max_iter=%d); falling back to cosine seeds.",
                 max_iter,
             )
-            ppr_scores = {nid: scores.get(nid, 0.0) for nid in self.G.nodes}
+            return {nid: fallback_scores.get(nid, 0.0) for nid in self.G.nodes}
 
-        # ── Step 5: Filter to db_id, threshold, sort, cap ─────────────────────
-        all_nodes = self.nodes  # dict[node_id → KGNode]
+    def _filter_and_sort(
+        self,
+        ppr_scores: dict[str, float],
+        *,
+        db_id: str | None,
+        score_threshold: float,
+        max_nodes: int,
+    ) -> list[tuple[KGNode, float]]:
+        """Step 5 — filter by threshold/db_id, sort descending, cap at max_nodes."""
+        all_nodes = self.nodes
         result_ids = [
             nid for nid, s in ppr_scores.items()
             if s >= score_threshold
@@ -452,9 +507,6 @@ class SchemaGraph:
         ]
         result_ids.sort(key=lambda nid: ppr_scores[nid], reverse=True)
         result_ids = result_ids[:max_nodes]
-
-        # Fix 1: Return real PPR scores as (KGNode, score) tuples instead of
-        # discarding them.  Callers use these scores for downstream RRF fusion.
         return [(all_nodes[nid], ppr_scores[nid]) for nid in result_ids]
 
     # ── Entry-point scoring helpers ────────────────────────────────────────────

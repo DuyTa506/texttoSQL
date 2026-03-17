@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
 from pathlib import Path
 import sqlparse
+
+from src.shared.sqlite_utils import safe_execute
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,15 @@ def execution_accuracy(
     if not predicted_sql.strip() or not Path(db_path).exists():
         return False
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(gold_sql)
-        gold_results = set(map(tuple, cursor.fetchall()))
-        cursor.execute(predicted_sql)
-        pred_results = set(map(tuple, cursor.fetchall()))
-        conn.close()
-        return gold_results == pred_results
+        gold_rows, err = safe_execute(db_path, gold_sql)
+        if err:
+            logger.debug("EX gold SQL error: %s", err)
+            return False
+        pred_rows, err = safe_execute(db_path, predicted_sql)
+        if err:
+            logger.debug("EX predicted SQL error: %s", err)
+            return False
+        return set(map(tuple, gold_rows)) == set(map(tuple, pred_rows))
     except Exception as e:
         logger.debug("EX evaluation error: %s", e)
         return False
