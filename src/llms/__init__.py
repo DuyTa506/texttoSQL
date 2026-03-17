@@ -18,13 +18,14 @@ Use LLMFactory to construct instances from config dicts:
 """
 
 from .base import BaseLLM
-from .factory import LLMFactory
+from .factory import LLMFactory, LLMConfig
 from .huggingface import HuggingFaceLLM
 from .openai import OpenAILLM
 
 __all__ = [
     "BaseLLM",
     "LLMFactory",
+    "LLMConfig",
     "OpenAILLM",
     "HuggingFaceLLM",
 ]
