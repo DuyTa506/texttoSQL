@@ -540,7 +540,17 @@ class GraphRetriever(BaseRetriever):
     # ── Embedding ─────────────────────────────────────────────────────────────
 
     def _embed(self, text: str) -> np.ndarray:
-        """Embed *text* using the stored SentenceTransformer."""
+        """Embed *text* using the stored embedder.
+
+        Supports both SentenceTransformer (``encode()``) and the project's
+        ``BaseEmbeddingModel`` (``embed_one()``), so ``GraphRetriever`` works
+        with OpenAI embeddings without needing ``sentence-transformers``.
+        """
+        if hasattr(self.embedder, "embed_one"):
+            # BaseEmbeddingModel API (OpenAI, HuggingFace wrapper)
+            vec = self.embedder.embed_one(text)
+            return np.asarray(vec, dtype=np.float32)
+        # SentenceTransformer API
         emb = self.embedder.encode([text], convert_to_numpy=True)[0]
         return emb.astype(np.float32)
 

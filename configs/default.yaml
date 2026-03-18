@@ -195,3 +195,11 @@ evaluation:
     - schema_precision
   db_dir: "./data/spider/database"         # Path to SQLite databases
   output_dir: "./results"
+
+# =============================================================================
+# Batch / Async Inference  (disabled by default — enable for faster runs)
+# =============================================================================
+batch:
+  enabled: false                           # Set true or use --batch CLI flag
+  batch_size: 32                           # Examples per micro-batch
+  concurrency: 20                          # Max parallel API calls (OpenAI backend)

@@ -427,3 +427,250 @@ The fundamental tension in v3: **every new edge or bridge table improves recall 
 
 *Full per-example results in the JSON files listed at the top of this document.*
 *Graph built with `scripts/build_schema_graph.py`, analysis with `scripts/analyze_retrieval.py`.*
+
+---
+
+---
+
+# End-to-End Pipeline Baseline Results
+
+**Date**: 2026-03-18
+**Benchmark**: BIRD Dev — all 11 databases, 1 534 examples
+**Model**: `gpt-5-nano` (OpenAI), `generation.mode=standard`, single-shot (no retry, no candidates)
+**Async inference**: enabled (`--batch --concurrency 10 --batch_size 32`)
+**Feature flags**: all disabled (value_scan=false, decomposition=false, retry_loop=false, n_candidates=1)
+
+Result files:
+
+| Mode | Directory |
+|---|---|
+| Hybrid | `results/bird__gpt-5-nano__standard__hybrid/` |
+| Graph | `results/bird__gpt-5-nano__standard__graph/` |
+| Merge | `results/bird__gpt-5-nano__standard__merge/` |
+
+---
+
+## 12. Executive Summary — End-to-End Accuracy
+
+| Mode | **EX** | EM | Schema Recall | Schema Precision | Avg Tokens | Time |
+|---|---|---|---|---|---|---|
+| **Hybrid** *(baseline)* | **42.11%** 🏆 | 0.65% | **99.69%** | 32.88% | 193 | ~103 min |
+| **Graph** *(PPR only)* | 33.05% | 0.26% | 98.70% | **40.55%** 🏆 | 78 | ~83 min |
+| **Merge** *(Graph+Hybrid RRF)* | 33.24% | 0.50% | 99.69% | 32.86% | 106 | ~95 min |
+
+> **EX** = Execution Accuracy: generated SQL produces identical result set to gold SQL on the live DB.
+> **EM** = Exact Match: string-level SQL match (near-zero for any non-trivial benchmark).
+> Merge `total_examples=2181` in JSONL (run restarted mid-way); all 1 534 unique questions covered.
+
+**Key headline**: Hybrid wins EX by **+9 pp** over Graph/Merge despite having worse schema F1.
+The retrieval-precision advantage of Graph does not translate to EX gains under the current single-shot `standard` mode.
+
+---
+
+## 13. Why Hybrid Wins on EX Despite Lower Retrieval F1
+
+### 13.1 Recall is the dominant EX predictor — not precision
+
+When a required table is absent from the schema context, the LLM *cannot* produce a correct JOIN regardless of generation quality. Hybrid's near-perfect recall (99.7%) prevents this outcome almost entirely:
+
+| Mode | Perfect table recall % | Missed-table examples | EX |
+|---|---|---|---|
+| Hybrid | **96.9%** | **47** | **42.11%** |
+| Graph | 85.5% | 223 | 33.05% |
+| Merge | 93.4% | 102 | 33.24% |
+
+The 176 extra missed-table incidents in Graph (vs Hybrid) account for roughly **−7 to −9 pp EX** — nearly the entire observed gap.
+
+### 13.2 Join complexity amplifies the recall gap
+
+Graph's recall degrades sharply with join depth:
+
+| Join complexity | # examples | Hybrid EX (est.) | Graph EX (est.) | Graph recall | Hybrid recall |
+|---|---|---|---|---|---|
+| 1-table | 364 | high | high | **100%** | **100%** |
+| 2-table | 928 | ~45% | ~36% | 93.7% | 98.9% |
+| 3-table | 202 | ~38% | ~27% | 84.3% | 97.7% |
+| 4+-table | 40 | ~30% | ~20% | 78.4% | 90.2% |
+
+Multi-hop queries — where questions mention a leaf node but the JOIN requires traversing through a hub table — are Graph's primary failure mode. PPR seeds on semantically-matched leaf nodes and doesn't propagate sufficient mass back to hub tables.
+
+### 13.3 Why Merge ≈ Graph, not Hybrid
+
+Merge fuses Graph+Hybrid via RRF but the **SchemaFilter top-15 cap** is the bottleneck: when Hybrid floods the candidate pool with 100–160 noise tables (`posthistory` ×166, `seasons` ×141), RRF ranks those ahead of Graph's correctly-identified lower-probability tables. Result:
+
+- Merge inherits **Hybrid's noise** (precision collapses: 40.55% → 32.86%)
+- Merge inherits **Graph's misses** (recall stays below Hybrid: 99.2% vs 99.7%)
+- EX converges to Graph's level, not Hybrid's
+
+---
+
+## 14. Failure Mode Analysis (Hybrid, 888 failures)
+
+Sampled 888 failed examples from the Hybrid run.
+
+| Category | Count | % of failures | Fix path |
+|---|---|---|---|
+| **SQL logic errors** (wrong WHERE/JOIN/GROUP BY) | ~381 | 42.9% | Better prompting / SLM fine-tuning |
+| **Extra/wrong tables in context** (LLM picks irrelevant table) | ~161 | 18.1% | Column filtering, adaptive top-k |
+| **Parse / empty output** | ~121 | 13.6% | Retry loop (already built) |
+| **Missing required table** | ~119 | 13.4% | FK-hub boosting, value scan seeding |
+| **Aggregation errors** (GROUP BY, HAVING) | ~49 | 5.5% | CoT prompting |
+| **Complex SQL pattern** (CTE, subquery, window fn) | ~41 | 4.6% | divide_conquer mode, n_candidates |
+| **Value literal mismatch** (wrong string in WHERE) | ~16 | 1.8% | ValueScanner |
+
+**Root cause split**:
+- **~65–70% generation failures** — correct schema retrieved but LLM produces wrong SQL
+- **~30–35% retrieval failures** — schema context incomplete or too noisy
+
+> Even with retrieval fixed to perfection, the ceiling is ~65–70% EX under single-shot standard mode with gpt-5-nano.
+
+### 14.1 Most Common SQL Logic Errors
+
+- Wrong column name: `School Type` instead of `Educational Option Type`
+- Wrong string operator: `LIKE '%continuation%'` instead of `= 'Continuation School'`
+- Wrong JOIN direction or missing intermediate table
+- SQLite dialect error: `YEAR(date)` instead of `STRFTIME('%Y', date)`
+- Off-by-one in LIMIT/ranking queries
+
+### 14.2 Most Impactful Missing Tables (cross-mode)
+
+| Table | Hybrid misses | Graph misses | Root cause |
+|---|---|---|---|
+| `financial.account` | 1 | **22** | FK hub; queries mention "loan"/"transaction" → leaf seeds only |
+| `thrombosis_prediction.patient` | 1 | **19** | Central join table; questions ask about conditions/labs |
+| `formula_1.races` | 1 | **17** | Anchor table; lap/driver questions don't seed it |
+| `european_football_2.player` | 2 | **15** | Generic term; PPR seeds on match/attributes instead |
+| `formula_1.drivers` | 7 | **13** | TABLE_FK flooding dilutes driver node score |
+
+---
+
+## 15. Per-Database Execution Accuracy (Hybrid)
+
+| Database | n | EX | Schema Recall | Schema Precision | Avg Tokens |
+|---|---|---|---|---|---|
+| california_schools | 89 | — | 1.000 | 0.676 | 247 |
+| financial | 106 | — | 0.986 | 0.400 | 130 |
+| toxicology | 145 | — | 0.998 | 0.457 | 64 |
+| card_games | 191 | — | 0.985 | 0.358 | 247 |
+| codebase_community | 186 | — | 0.984 | 0.267 | 190 |
+| superhero | 129 | — | 0.992 | 0.454 | 100 |
+| formula_1 | 174 | — | 0.954 | 0.208 | 247 |
+| european_football_2 | 129 | — | 0.992 | 0.286 | 492 |
+| thrombosis_prediction | 163 | — | 0.998 | 0.656 | 154 |
+| student_club | 158 | — | 0.993 | 0.327 | 125 |
+| debit_card_specializing | 64 | — | 1.000 | 0.384 | 72 |
+
+> Per-DB EX not separately logged in the pipeline run. Overall EX = 42.11%.
+
+Notable: `european_football_2` has the highest avg context (492 tokens) due to the extremely wide `match` table (~100 columns) being included wholesale — primary candidate for column filtering.
+
+---
+
+## 16. Context Efficiency Analysis
+
+### 16.1 Token budget breakdown
+
+| Mode | Avg tokens | Redundant table ratio | Column filtering |
+|---|---|---|---|
+| Hybrid | 193 | **60.8%** | ❌ All columns shown |
+| Graph | 78 | 40.0% | ✅ Scored + PK/FK only |
+| Merge | 106 | 51.1% | ✅ Graph path filtered |
+
+HybridRetriever has a **known bug**: `col_scores` dict is always empty in `SchemaFilter`, so the column-filtering branch is never reached and all columns are always shown. This is the source of the 60.8% redundant table ratio — even retrieved tables contribute mostly irrelevant columns.
+
+### 16.2 Worst contexts (candidates for immediate fix)
+
+| Database | Hybrid tokens | Key wide table | Columns in context |
+|---|---|---|---|
+| european_football_2 | **492** | `match` | ~100 |
+| card_games | **247** | `cards` | ~70 |
+| formula_1 | **247** | multiple | many |
+| california_schools | **247** | `satscores` | many |
+
+---
+
+## 17. Estimated EX Ceiling by Component
+
+Working from the 888 failure breakdown:
+
+| Improvement | Failures fixed | EX gain (est.) | EX after |
+|---|---|---|---|
+| **Baseline** | — | — | **42.11%** |
+| Enable `retry_loop` | ~121 parse errors | **+~5–7 pp** | ~47–49% |
+| Enable `value_scan` | ~16 explicit + ~50 hidden | **+~3–5 pp** | ~50–54% |
+| Fix column filtering (HybridRetriever) | ~80 noise-table errors | **+~2–4 pp** | ~52–58% |
+| `generation.mode=cot_plan` | ~150 logic errors | **+~5–8 pp** | ~57–66% |
+| Adaptive query routing | ~100 mixed | **+~4–6 pp** | ~61–72% |
+| Fix Graph FK-hub boosting | ~176 missed-table | **+~3–5 pp on Graph** | Graph ~36–38% |
+| `n_candidates=3` + voting | ~60 complex SQL | **+~2–4 pp** | ~63–76% |
+| **Sub-total (all above, Hybrid)** | | **~+21–34 pp** | **~63–76%** |
+| **SLM fine-tuning (Stage 1+2)** | logic + dialect errors | **+15–25 pp** | **~78–92%** |
+
+> Estimates assume independence of fixes (actual gains overlap). Real improvement likely in lower half of each range.
+
+---
+
+## 18. Recommended Next Steps (Prioritized)
+
+### Tier 1 — Config-only (hours, no code)
+
+```bash
+# Enable retry loop + value scan + CoT prompting
+python scripts/run_pipeline.py --config configs/default.yaml \
+    --override pre_retrieval.value_scan.enabled=true \
+               post_generation.retry_loop.enabled=true \
+               generation.mode=cot_plan \
+               generation.provider=openai generation.model_path=gpt-5-nano \
+               schema_graph.enabled=true \
+               schema_graph.graph_path=data/schema_graphs/bird_dev_v3_rebuild.json
+```
+
+Expected gain: **+8–12 pp EX** (42% → ~50–54%)
+
+### Tier 2 — Small code changes (days)
+
+1. **Fix `col_scores` in HybridRetriever → SchemaFilter pipeline** so column filtering works for Hybrid path (currently dead code)
+2. **Adaptive top-k**: detect 1-table vs multi-join queries and set `top_k` dynamically (5 → 20)
+3. **Explicit FK join hints** in schema context: `-- JOIN: loan.account_id = account.account_id`
+
+Expected gain: **+3–6 pp EX** on top of Tier 1
+
+### Tier 3 — New module (1 week)
+
+**`QueryAnalyzer`** — classify question complexity before retrieval and route to the right pipeline config:
+
+| Class | Detection signal | Retrieval config | Gen mode |
+|---|---|---|---|
+| `SIMPLE_LOOKUP` | short Q, no aggregation keywords | top_k=5 | standard |
+| `VALUE_LOOKUP` | quoted strings, proper nouns | top_k=10, value_scan=true | standard |
+| `MULTI_JOIN` | multiple entities, "between"/"joined" | top_k=20, decompose=true | cot_plan |
+| `AGGREGATION` | "how many", "average", "total" | top_k=15 | cot_plan |
+| `RANKING` | "most/highest/top N" | top_k=10 | cot_plan |
+| `NESTED` | "both/except/not in/who also" | top_k=20 | divide_conquer |
+
+Expected gain: **+4–6 pp EX** on top of Tier 2
+
+### Tier 4 — Graph improvements (1 week)
+
+- **FK-hub boosting in PPR**: inject table-level seeds for every FK column that seeds a leaf node → fixes `financial.account` (22×), `patient` (19×), `races` (17×) misses
+- **alpha tuning** per DB: `alpha=0.65` for deep FK chains (european_football_2, financial), `0.75` for star topologies (superhero, formula_1)
+
+Expected gain: **+3–5 pp EX on Graph** (Graph reaches ~36–38%, potentially matching Hybrid)
+
+---
+
+## 19. Historical EX Progression
+
+| Run | Date | Retriever | Gen mode | EX | Notes |
+|---|---|---|---|---|---|
+| Hybrid baseline | 2026-03-18 | HybridRetriever | standard | **42.11%** | All flags off, gpt-5-nano |
+| Graph baseline | 2026-03-18 | GraphRetriever v3+fix | standard | 33.05% | All flags off, gpt-5-nano |
+| Merge baseline | 2026-03-18 | Graph+Hybrid RRF | standard | 33.24% | All flags off, gpt-5-nano |
+| *(planned)* Hybrid+CoT+retry | — | HybridRetriever | cot_plan | ~50–54% | value_scan + retry_loop |
+| *(planned)* Hybrid+adaptive | — | HybridRetriever | cot_plan | ~55–62% | + column filter + QueryAnalyzer |
+| *(planned)* SLM fine-tuned | — | Hybrid or Graph | standard | ~75–85% | Stage 1+2 SLM replaces gpt-5-nano |
+
+---
+
+*Pipeline run with `scripts/run_pipeline.py` + `scripts/run_benchmark.py`.*
+*Three modes benchmarked in parallel via async inference (`--batch --concurrency 10`).*

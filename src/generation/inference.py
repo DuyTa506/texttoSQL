@@ -26,9 +26,11 @@ multi-candidate generation (n_candidates > 1) are supported by both backends.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+
 logger = logging.getLogger(__name__)
 
 # ── System prompt fragments for each generation mode ─────────────────────────
@@ -212,6 +214,121 @@ class SQLInference:
             results.append(_parse_output(raw))
         return results
 
+    # ── Async API ─────────────────────────────────────────────────────────────
+
+    async def agenerate(
+        self,
+        question: str,
+        schema_context: str,
+        mode: str = "standard",
+        n_candidates: int = 1,
+    ):
+        """Async version of :meth:`generate`.
+
+        Uses ``backend.async_complete()`` for OpenAI backends, or falls
+        back to ``asyncio.to_thread()`` for local backends.
+        """
+        if n_candidates > 1:
+            return await self._agenerate_candidates(
+                question, schema_context, mode, n_candidates
+            )
+
+        messages = _build_messages(question, schema_context, mode)
+
+        if hasattr(self._backend, "async_complete"):
+            raw = await self._backend.async_complete(
+                messages, temperature=self.temperature
+            )
+        else:
+            raw = await asyncio.to_thread(
+                self._backend.complete, messages, self.temperature
+            )
+
+        return _parse_output(raw)
+
+    async def _agenerate_candidates(
+        self, question: str, schema_context: str, mode: str, n: int,
+    ) -> list[dict]:
+        messages = _build_messages(question, schema_context, mode)
+        results = []
+        for _ in range(n):
+            if hasattr(self._backend, "async_complete"):
+                raw = await self._backend.async_complete(
+                    messages, temperature=self.candidate_temperature
+                )
+            else:
+                raw = await asyncio.to_thread(
+                    self._backend.complete, messages, self.candidate_temperature
+                )
+            results.append(_parse_output(raw))
+        return results
+
+    async def agenerate_batch(
+        self,
+        items: list[tuple[str, str]],
+        mode: str = "standard",
+        n_candidates: int = 1,
+        concurrency: int = 20,
+    ) -> list:
+        """Async batch generation with concurrency control.
+
+        Parameters
+        ----------
+        items:
+            List of ``(question, schema_context)`` tuples.
+        mode:
+            Generation mode.
+        n_candidates:
+            Candidates per example.
+        concurrency:
+            Max parallel API calls (semaphore limit).
+
+        Returns
+        -------
+        list[dict | list[dict]]
+            One result per input item (dict or list[dict] if n_candidates > 1).
+        """
+        # For local backends with batch_complete, use GPU batching
+        if hasattr(self._backend, "batch_complete") and n_candidates == 1:
+            messages_list = [
+                _build_messages(q, sc, mode) for q, sc in items
+            ]
+            raws = self._backend.batch_complete(
+                messages_list, temperature=self.temperature
+            )
+            return [_parse_output(raw) for raw in raws]
+
+        # For API backends, use semaphore-controlled async gather
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _throttled(question: str, schema_context: str):
+            async with semaphore:
+                for attempt in range(3):
+                    try:
+                        return await self.agenerate(
+                            question, schema_context,
+                            mode=mode, n_candidates=n_candidates,
+                        )
+                    except Exception as exc:
+                        err_msg = str(exc).lower()
+                        is_rate_limit = (
+                            "rate" in err_msg
+                            or "429" in err_msg
+                            or "too many" in err_msg
+                        )
+                        if is_rate_limit and attempt < 2:
+                            wait = (2 ** attempt) * 1.0
+                            logger.warning(
+                                "Rate limit hit, retrying in %.1fs (attempt %d/3): %s",
+                                wait, attempt + 1, exc,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                        raise
+
+        tasks = [_throttled(q, sc) for q, sc in items]
+        return await asyncio.gather(*tasks)
+
 
 # ── Backends ──────────────────────────────────────────────────────────────────
 
@@ -284,6 +401,82 @@ class _LocalBackend:
 
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    def batch_complete(
+        self,
+        messages_list: list[list[dict]],
+        temperature: float = 0.0,
+        sub_batch_size: int = 8,
+    ) -> list[str]:
+        """Run batched local inference with left-pad tokenization.
+
+        Processes ``messages_list`` in sub-batches of ``sub_batch_size`` to
+        avoid GPU OOM.  Each sub-batch is a single ``model.generate()`` call
+        with left-padded inputs.
+
+        Parameters
+        ----------
+        messages_list:
+            List of chat message lists, one per example.
+        temperature:
+            Sampling temperature (0.0 = greedy).
+        sub_batch_size:
+            Max examples per GPU forward pass.
+
+        Returns
+        -------
+        list[str]
+            One completion string per input.
+        """
+        import torch
+
+        results: list[str] = []
+
+        # Ensure tokenizer is left-padded for batched generation
+        tokenizer = self.tokenizer
+        model = self.model
+
+        original_padding_side = getattr(tokenizer, "padding_side", "right")
+        original_pad_token_id = tokenizer.pad_token_id
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        try:
+            for start in range(0, len(messages_list), sub_batch_size):
+                batch_msgs = messages_list[start : start + sub_batch_size]
+                prompts = [_messages_to_chatml(m) for m in batch_msgs]
+
+                inputs = tokenizer(
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                ).to(model.device)
+
+                gen_kwargs = {
+                    "max_new_tokens": self.max_new_tokens,
+                    "do_sample": temperature > 0,
+                    "temperature": max(temperature, 1e-7),
+                    "pad_token_id": tokenizer.pad_token_id,
+                }
+
+                with torch.no_grad():
+                    output_ids = model.generate(**inputs, **gen_kwargs)
+
+                input_len = inputs["input_ids"].shape[1]
+                for j in range(len(batch_msgs)):
+                    new_tokens = output_ids[j][input_len:]
+                    text = tokenizer.decode(
+                        new_tokens, skip_special_tokens=True
+                    ).strip()
+                    results.append(text)
+        finally:
+            # Restore original tokenizer state
+            tokenizer.padding_side = original_padding_side
+            tokenizer.pad_token_id = original_pad_token_id
+
+        return results
 
 
 class _OpenAIBackend:
@@ -415,6 +608,57 @@ class _OpenAIBackend:
                     continue
                 raise
         raise last_err
+
+    def _get_async_client(self):
+        """Lazy-init an AsyncOpenAI client (same config as sync client)."""
+        if not hasattr(self, "_async_client") or self._async_client is None:
+            try:
+                from openai import AsyncOpenAI
+            except ImportError:
+                raise ImportError(
+                    "openai package is required for async provider='openai'. "
+                    "Install with: pip install openai"
+                )
+            kwargs: dict = {"api_key": self.api_key}
+            if self.api_base_url:
+                kwargs["base_url"] = self.api_base_url
+            self._async_client = AsyncOpenAI(**kwargs)
+            logger.info("AsyncOpenAI client initialized for model=%s", self.model)
+        return self._async_client
+
+    async def async_complete(
+        self, messages: list[dict], temperature: float = 0.0
+    ) -> str:
+        """Async version of complete() — uses AsyncOpenAI client.
+
+        Reuses the cached ``_compat_strategy`` discovered by the sync path.
+        If no strategy is cached yet, does a sync discovery call first
+        (one-time cost) so the async path doesn't need its own fallback chain.
+        """
+        client = self._get_async_client()
+
+        # Ensure compat strategy is discovered (sync path does this lazily)
+        if self._compat_strategy is None:
+            # Do one sync call to discover the working strategy
+            self.complete(messages, temperature)
+
+        strategies = [
+            {"max_completion_tokens": self.max_tokens, "temperature": temperature},
+            {"max_completion_tokens": self.max_tokens},
+            {"max_tokens": self.max_tokens, "temperature": temperature},
+        ]
+        kwargs = strategies[self._compat_strategy]
+
+        try:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **kwargs,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            logger.error("Async OpenAI API call failed: %s", exc)
+            raise
 
 
 # ── Shared prompt / output helpers ────────────────────────────────────────────

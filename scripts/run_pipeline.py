@@ -21,11 +21,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -199,7 +201,6 @@ def _build_retriever(
         return hybrid_retriever
 
     try:
-        from sentence_transformers import SentenceTransformer
         from src.schema_graph import SchemaGraph
         from src.retrieval.graph_retriever import GraphRetriever
     except ImportError as exc:
@@ -238,9 +239,22 @@ def _build_retriever(
             node_collection_name, exc,
         )
 
-    embedding_model = cfg["indexing"]["embedding_model"]
-    logger.info("Loading SentenceTransformer '%s' for GraphRetriever ...", embedding_model)
-    embedder = SentenceTransformer(embedding_model)
+    # Use the same embedding encoder already built for ChromaDB indexing.
+    # GraphRetriever._embed() supports both BaseEmbeddingModel (embed_one)
+    # and SentenceTransformer (encode) APIs, so no sentence-transformers needed.
+    embedder = _build_embedding_encoder(cfg["indexing"])
+    if embedder is None:
+        # Fallback to SentenceTransformer if no encoder was built
+        try:
+            from sentence_transformers import SentenceTransformer
+            embedding_model = cfg["indexing"]["embedding_model"]
+            logger.info("Loading SentenceTransformer '%s' for GraphRetriever ...", embedding_model)
+            embedder = SentenceTransformer(embedding_model)
+        except ImportError:
+            logger.warning("No embedding encoder available for GraphRetriever — falling back to HybridRetriever.")
+            return hybrid_retriever
+    else:
+        logger.info("Using existing embedding encoder for GraphRetriever.")
 
     graph_retriever = GraphRetriever(
         graph,
@@ -434,7 +448,16 @@ def _make_run_dir(cfg: dict, output_base: str = "./results") -> Path:
     model = cfg.get("generation", {}).get("model_path", "none") or "none"
     model_tag = model.replace("/", "_").replace(".", "_")
     gen_mode = cfg.get("generation", {}).get("mode", "standard")
-    setup_tag = f"{adapter}__{model_tag}__{gen_mode}"
+
+    # Include retriever mode in directory name so parallel runs don't collide
+    sg_cfg = cfg.get("schema_graph", {})
+    if sg_cfg.get("enabled", False) and sg_cfg.get("hybrid", False):
+        retriever_tag = "merge"
+    elif sg_cfg.get("enabled", False):
+        retriever_tag = "graph"
+    else:
+        retriever_tag = "hybrid"
+    setup_tag = f"{adapter}__{model_tag}__{gen_mode}__{retriever_tag}"
 
     run_dir = Path(output_base) / setup_tag
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -488,13 +511,725 @@ def _save_final(run_dir: Path, results: list[dict], metrics: dict | None):
 
 
 # =============================================================================
-# Main pipeline
+# Phase 1+2 extracted helper  (reusable by both sync and async loops)
 # =============================================================================
 
-def main(config_path: str, overrides: list[str] | None = None):
+def _process_phases_1_2(
+    question: str,
+    ex,
+    db,
+    *,
+    value_scanner,
+    augmentor,
+    aug_strategy: str,
+    decomposer,
+    retriever,
+    linker,
+    all_chunks: list,
+    schema_filter,
+    idx: int = 0,
+) -> dict:
+    """Run Phase 1 (pre-retrieval) + Phase 2 (retrieval) for one example.
+
+    Returns a dict with:
+      - question: str (with evidence hint if applicable)
+      - schema_context: str
+      - retrieved_tables: set[str]
+      - value_hints: str
+    """
+    # === PHASE 1: Pre-Retrieval ===
+    value_hints: str = ""
+    value_matches_list = None
+    if value_scanner is not None:
+        try:
+            matches = value_scanner.scan(question, db)
+            value_hints = value_scanner.to_schema_hints(matches)
+            value_matches_list = matches
+        except Exception as e:
+            logger.debug("ValueScanner error on example %d: %s", idx, e)
+
+    aug_result = augmentor.augment(
+        question,
+        db,
+        value_scanner=value_scanner if aug_strategy == "value" else None,
+        decomposer=decomposer if aug_strategy == "decompose" else None,
+    )
+
+    # === PHASE 2: Retrieval ===
+    retriever_kwargs = {"db_id": ex.db_id}
+    if value_matches_list and hasattr(retriever, 'graph'):
+        retriever_kwargs["value_matches"] = value_matches_list
+
+    if isinstance(aug_result, list):
+        expanded = linker.expand(
+            retriever.retrieve_multi(aug_result, **retriever_kwargs),
+            db,
+            [c for c in all_chunks if c.db_id == ex.db_id],
+        )
+    else:
+        raw_results = retriever.retrieve(aug_result, **retriever_kwargs)
+        db_chunks = [c for c in all_chunks if c.db_id == ex.db_id]
+        expanded = linker.expand(raw_results, db, db_chunks)
+
+    schema_context = schema_filter.filter_and_format(
+        expanded, db, value_hints=value_hints if value_hints else None
+    )
+    retrieved_tables = schema_filter.get_retrieved_tables(expanded)
+
+    return {
+        "question": question,
+        "schema_context": schema_context,
+        "retrieved_tables": retrieved_tables,
+        "value_hints": value_hints,
+    }
+
+
+# =============================================================================
+# Async batch pipeline loop
+# =============================================================================
+
+def _run_async_pipeline_loop(
+    *,
+    dev_examples: list,
+    db_map: dict,
+    results: list[dict],
+    completed_keys: set[str],
+    run_dir: Path,
+    # Phase 1+2 components
+    value_scanner,
+    augmentor,
+    aug_strategy: str,
+    decomposer,
+    retriever,
+    linker,
+    all_chunks: list,
+    schema_filter,
+    # Phase 3 components
+    inference,
+    gen_mode: str,
+    n_candidates: int,
+    # Phase 4 components
+    retry_loop,
+    candidate_selector,
+    # Batch config
+    batch_size: int = 32,
+    concurrency: int = 20,
+):
+    """Run the pipeline with async/batch LLM inference.
+
+    Phases 1+2 run sequentially per example (fast, <20ms each).
+    Phase 3 LLM calls are batched and run in parallel.
+    Phases 4 + evaluation run sequentially per example.
+    """
+    asyncio.run(_async_pipeline_loop_inner(
+        dev_examples=dev_examples,
+        db_map=db_map,
+        results=results,
+        completed_keys=completed_keys,
+        run_dir=run_dir,
+        value_scanner=value_scanner,
+        augmentor=augmentor,
+        aug_strategy=aug_strategy,
+        decomposer=decomposer,
+        retriever=retriever,
+        linker=linker,
+        all_chunks=all_chunks,
+        schema_filter=schema_filter,
+        inference=inference,
+        gen_mode=gen_mode,
+        n_candidates=n_candidates,
+        retry_loop=retry_loop,
+        candidate_selector=candidate_selector,
+        batch_size=batch_size,
+        concurrency=concurrency,
+    ))
+
+
+async def _async_pipeline_loop_inner(
+    *,
+    dev_examples: list,
+    db_map: dict,
+    results: list[dict],
+    completed_keys: set[str],
+    run_dir: Path,
+    value_scanner,
+    augmentor,
+    aug_strategy: str,
+    decomposer,
+    retriever,
+    linker,
+    all_chunks: list,
+    schema_filter,
+    inference,
+    gen_mode: str,
+    n_candidates: int,
+    retry_loop,
+    candidate_selector,
+    batch_size: int,
+    concurrency: int,
+):
+    """Inner async implementation of the batch pipeline loop."""
+    from src.evaluation.metrics import compute_metrics, execution_accuracy, exact_match, schema_recall, schema_precision
+
+    # Filter to pending examples
+    pending = []
+    for i, ex in enumerate(dev_examples):
+        db = db_map.get(ex.db_id)
+        if db is None:
+            continue
+        ex_key = f"{ex.db_id}||{ex.question}"
+        if ex_key in completed_keys:
+            continue
+        # Prepare question with evidence hint
+        question = ex.question
+        if getattr(ex, "evidence", "") and ex.evidence.strip():
+            question = f"{ex.question}\nHint: {ex.evidence.strip()}"
+        pending.append((i, ex, db, question))
+
+    if not pending:
+        logger.info("All examples already completed — nothing to do.")
+        return
+
+    logger.info(
+        "Async batch mode: %d pending examples, batch_size=%d, concurrency=%d",
+        len(pending), batch_size, concurrency,
+    )
+
+    total_processed = 0
+    t0 = time.time()
+
+    # Process in micro-batches
+    for batch_start in range(0, len(pending), batch_size):
+        batch = pending[batch_start : batch_start + batch_size]
+        batch_t0 = time.time()
+
+        # ── Phase 1 + 2: sequential per example (fast) ────────────────────
+        phase12_results = []
+        for i, ex, db, question in batch:
+            p12 = _process_phases_1_2(
+                question, ex, db,
+                value_scanner=value_scanner,
+                augmentor=augmentor,
+                aug_strategy=aug_strategy,
+                decomposer=decomposer,
+                retriever=retriever,
+                linker=linker,
+                all_chunks=all_chunks,
+                schema_filter=schema_filter,
+                idx=i,
+            )
+            phase12_results.append(p12)
+
+        # ── Phase 3: batched LLM generation ───────────────────────────────
+        gen_results: list = []
+        if inference is not None:
+            items = [
+                (p12["question"], p12["schema_context"])
+                for p12 in phase12_results
+            ]
+            try:
+                gen_results = await inference.agenerate_batch(
+                    items,
+                    mode=gen_mode,
+                    n_candidates=n_candidates,
+                    concurrency=concurrency,
+                )
+            except Exception as exc:
+                logger.warning("Batch inference error: %s — falling back to empty", exc)
+                gen_results = [
+                    {"sql": "", "reasoning": "", "raw_output": ""}
+                    for _ in items
+                ]
+        else:
+            gen_results = [None] * len(batch)
+
+        # ── Phase 4 + Evaluation: sequential per example ──────────────────
+        for j, (i, ex, db, question) in enumerate(batch):
+            p12 = phase12_results[j]
+            raw_gen = gen_results[j]
+
+            # Phase 4a: CandidateSelector
+            gen_result = None
+            if raw_gen is not None:
+                if isinstance(raw_gen, list) and candidate_selector is not None:
+                    gen_result = candidate_selector.select(raw_gen, ex.db_id)
+                elif isinstance(raw_gen, list):
+                    gen_result = raw_gen[0] if raw_gen else {}
+                else:
+                    gen_result = raw_gen
+
+            # Phase 4b: Retry Loop
+            retry_count = 0
+            correction_applied = False
+            if gen_result is not None and retry_loop is not None:
+                try:
+                    gen_result = retry_loop.run(
+                        question=p12["question"],
+                        schema_context=p12["schema_context"],
+                        initial_result=gen_result,
+                        db_id=ex.db_id,
+                        gold_sql=ex.query,
+                    )
+                    retry_count = gen_result.get("retry_count", 0)
+                    correction_applied = gen_result.get("correction_applied", False)
+                except Exception as e:
+                    logger.warning("RetryLoop error on example %d: %s", i, e)
+
+            # Evaluation
+            predicted_sql = gen_result.get("sql", "") if gen_result else ""
+            gold_sql = ex.query
+            db_path = db.db_path or ""
+
+            ex_result = False
+            em_result = False
+            if predicted_sql and db_path:
+                ex_result = execution_accuracy(predicted_sql, gold_sql, db_path)
+                em_result = exact_match(predicted_sql, gold_sql)
+            elif predicted_sql:
+                em_result = exact_match(predicted_sql, gold_sql)
+
+            recall_val = schema_recall(p12["retrieved_tables"], gold_sql)
+            precision_val = schema_precision(p12["retrieved_tables"], gold_sql)
+
+            result_entry = {
+                "db_id": ex.db_id,
+                "question": p12["question"],
+                "evidence": getattr(ex, "evidence", ""),
+                "schema_context": p12["schema_context"],
+                "gold_sql": gold_sql,
+                "predicted_sql": predicted_sql,
+                "raw_output": gen_result.get("raw_output", "") if gen_result else "",
+                "ex": ex_result,
+                "em": em_result,
+                "recall": recall_val,
+                "precision": precision_val,
+                "retry_count": retry_count,
+                "correction_applied": correction_applied,
+            }
+            results.append(result_entry)
+            _append_result(run_dir, result_entry)
+
+        total_processed += len(batch)
+        batch_elapsed = time.time() - batch_t0
+
+        if total_processed % 100 < batch_size or batch_start + batch_size >= len(pending):
+            partial = compute_metrics(results)
+            elapsed = time.time() - t0
+            logger.info(
+                "Batch progress %d/%d (%.1fs elapsed, %.2fs/batch) — "
+                "EX=%.3f EM=%.3f recall=%.3f precision=%.3f",
+                total_processed, len(pending), elapsed, batch_elapsed,
+                partial["execution_accuracy"],
+                partial["exact_match"],
+                partial["schema_recall"],
+                partial["schema_precision"],
+            )
+
+
+# =============================================================================
+# Multi-mode benchmark orchestration
+# =============================================================================
+
+# Mode override presets
+_MODE_OVERRIDES = {
+    "hybrid": {
+        "schema_graph.enabled": False,
+        "schema_graph.hybrid": False,
+    },
+    "graph": {
+        "schema_graph.enabled": True,
+        "schema_graph.hybrid": False,
+    },
+    "merge": {
+        "schema_graph.enabled": True,
+        "schema_graph.hybrid": True,
+    },
+}
+
+
+def _apply_mode_overrides(cfg: dict, mode: str) -> dict:
+    """Apply mode-specific config overrides (returns a modified copy)."""
+    import copy
+    cfg = copy.deepcopy(cfg)
+    overrides = _MODE_OVERRIDES.get(mode, {})
+    for key_path, value in overrides.items():
+        parts = key_path.split(".")
+        node = cfg
+        for part in parts[:-1]:
+            if part not in node:
+                node[part] = {}
+            node = node[part]
+        node[parts[-1]] = value
+    return cfg
+
+
+def _run_single_mode(
+    cfg: dict,
+    mode_name: str,
+    *,
+    databases,
+    examples,
+    all_chunks,
+    indexer,
+    npmi_scorer,
+    batch_enabled: bool,
+    batch_size: int,
+    concurrency: int,
+) -> dict:
+    """Run the pipeline for a single retriever mode.
+
+    Returns the final metrics dict.
+    """
+    mode_cfg = _apply_mode_overrides(cfg, mode_name)
+
+    logger.info("=" * 60)
+    logger.info("=== Running mode: %s ===", mode_name.upper())
+    logger.info("=" * 60)
+
+    # Build retriever for this mode
+    retriever = _build_retriever(mode_cfg, indexer, all_chunks, npmi_scorer=npmi_scorer)
+
+    ret_cfg = mode_cfg["retrieval"]
+    linker = BidirectionalLinker(
+        max_expansion_depth=ret_cfg["bidirectional"]["max_expansion_depth"],
+    )
+    schema_filter_obj = SchemaFilter(top_k=ret_cfg["final_top_k"])
+
+    pre_cfg = mode_cfg.get("pre_retrieval", {})
+    gen_cfg = mode_cfg.get("generation", {})
+    post_cfg = mode_cfg.get("post_generation", {})
+    eval_cfg = mode_cfg.get("evaluation", {})
+
+    aug_strategy = mode_cfg["augmentation"].get("strategy", "keyword")
+    augmentor = QueryAugmentor(strategy=aug_strategy)
+
+    value_scanner = _build_value_scanner(pre_cfg)
+    decomposer = _build_decomposer(pre_cfg)
+    inference = _build_inference(gen_cfg)
+    gen_mode = gen_cfg.get("mode", "standard")
+    n_candidates = gen_cfg.get("n_candidates", 1)
+
+    # Phase 4 components
+    db_dir = eval_cfg.get("db_dir", "")
+    executor = None
+    retry_loop = None
+    candidate_selector = None
+    if db_dir:
+        from src.post.sql_executor import SQLExecutor
+        executor = SQLExecutor(db_dir=db_dir)
+        retry_loop = _build_retry_loop(post_cfg, executor, inference)
+        candidate_selector = _build_candidate_selector(post_cfg, executor)
+
+    db_map = {db.db_id: db for db in databases}
+
+    max_examples = mode_cfg.get("_max_examples", 0)
+    dev_examples = examples[:max_examples] if max_examples else examples
+
+    # Use mode-specific run directory
+    output_base = eval_cfg.get("output_dir", "./results")
+    # Tag directory with mode name
+    original_model = gen_cfg.get("model_path", "none") or "none"
+    model_tag = original_model.replace("/", "_").replace(".", "_")
+    adapter = mode_cfg.get("data", {}).get("adapter", "spider_v1")
+    setup_tag = f"{adapter}__{model_tag}__{gen_mode}__{mode_name}"
+    run_dir = Path(output_base) / setup_tag
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "config.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(mode_cfg, f, default_flow_style=False)
+
+    results: list[dict] = _load_existing_results(run_dir)
+    completed_keys: set[str] = set()
+    for r in results:
+        completed_keys.add(f"{r['db_id']}||{r['question']}")
+    if results:
+        logger.info("[%s] Resuming: %d examples already completed", mode_name, len(results))
+
+    t0 = time.time()
+
+    if batch_enabled and inference is not None:
+        _run_async_pipeline_loop(
+            dev_examples=dev_examples,
+            db_map=db_map,
+            results=results,
+            completed_keys=completed_keys,
+            run_dir=run_dir,
+            value_scanner=value_scanner,
+            augmentor=augmentor,
+            aug_strategy=aug_strategy,
+            decomposer=decomposer,
+            retriever=retriever,
+            linker=linker,
+            all_chunks=all_chunks,
+            schema_filter=schema_filter_obj,
+            inference=inference,
+            gen_mode=gen_mode,
+            n_candidates=n_candidates,
+            retry_loop=retry_loop,
+            candidate_selector=candidate_selector,
+            batch_size=batch_size,
+            concurrency=concurrency,
+        )
+    else:
+        # Original sequential loop
+        for i, ex in enumerate(dev_examples):
+            db = db_map.get(ex.db_id)
+            if db is None:
+                continue
+            ex_key = f"{ex.db_id}||{ex.question}"
+            if ex_key in completed_keys:
+                continue
+
+            question = ex.question
+            if getattr(ex, "evidence", "") and ex.evidence.strip():
+                question = f"{ex.question}\nHint: {ex.evidence.strip()}"
+
+            p12 = _process_phases_1_2(
+                question, ex, db,
+                value_scanner=value_scanner,
+                augmentor=augmentor,
+                aug_strategy=aug_strategy,
+                decomposer=decomposer,
+                retriever=retriever,
+                linker=linker,
+                all_chunks=all_chunks,
+                schema_filter=schema_filter_obj,
+                idx=i,
+            )
+
+            # Phase 3: Generation
+            gen_result = None
+            if inference is not None:
+                try:
+                    raw_gen = inference.generate(
+                        p12["question"], p12["schema_context"],
+                        mode=gen_mode, n_candidates=n_candidates,
+                    )
+                    if isinstance(raw_gen, list) and candidate_selector is not None:
+                        gen_result = candidate_selector.select(raw_gen, ex.db_id)
+                    elif isinstance(raw_gen, list):
+                        gen_result = raw_gen[0] if raw_gen else {}
+                    else:
+                        gen_result = raw_gen
+                except Exception as e:
+                    logger.warning("Inference error on example %d: %s", i, e)
+                    gen_result = {"sql": "", "reasoning": "", "raw_output": ""}
+
+            # Phase 4b: Retry
+            retry_count = 0
+            correction_applied = False
+            if gen_result is not None and retry_loop is not None:
+                try:
+                    gen_result = retry_loop.run(
+                        question=p12["question"],
+                        schema_context=p12["schema_context"],
+                        initial_result=gen_result,
+                        db_id=ex.db_id,
+                        gold_sql=ex.query,
+                    )
+                    retry_count = gen_result.get("retry_count", 0)
+                    correction_applied = gen_result.get("correction_applied", False)
+                except Exception as e:
+                    logger.warning("RetryLoop error on example %d: %s", i, e)
+
+            # Evaluation
+            predicted_sql = gen_result.get("sql", "") if gen_result else ""
+            gold_sql = ex.query
+            db_path = db.db_path or ""
+
+            ex_result = False
+            em_result = False
+            if predicted_sql and db_path:
+                ex_result = execution_accuracy(predicted_sql, gold_sql, db_path)
+                em_result = exact_match(predicted_sql, gold_sql)
+            elif predicted_sql:
+                em_result = exact_match(predicted_sql, gold_sql)
+
+            recall_val = schema_recall(p12["retrieved_tables"], gold_sql)
+            precision_val = schema_precision(p12["retrieved_tables"], gold_sql)
+
+            result_entry = {
+                "db_id": ex.db_id,
+                "question": p12["question"],
+                "evidence": getattr(ex, "evidence", ""),
+                "schema_context": p12["schema_context"],
+                "gold_sql": gold_sql,
+                "predicted_sql": predicted_sql,
+                "raw_output": gen_result.get("raw_output", "") if gen_result else "",
+                "ex": ex_result,
+                "em": em_result,
+                "recall": recall_val,
+                "precision": precision_val,
+                "retry_count": retry_count,
+                "correction_applied": correction_applied,
+            }
+            results.append(result_entry)
+            _append_result(run_dir, result_entry)
+
+            if (i + 1) % 100 == 0:
+                partial = compute_metrics(results)
+                logger.info(
+                    "[%s] Progress %d/%d — EX=%.3f EM=%.3f recall=%.3f precision=%.3f",
+                    mode_name, i + 1, len(dev_examples),
+                    partial["execution_accuracy"],
+                    partial["exact_match"],
+                    partial["schema_recall"],
+                    partial["schema_precision"],
+                )
+
+    elapsed = time.time() - t0
+
+    # Compute final metrics
+    final_metrics = {}
+    if results:
+        metrics = compute_metrics(results)
+        total_retried = sum(1 for r in results if r.get("retry_count", 0) > 0)
+        total_corrected = sum(1 for r in results if r.get("correction_applied", False))
+        avg_retries = sum(r.get("retry_count", 0) for r in results) / len(results)
+
+        final_metrics = {
+            **metrics,
+            "mode": mode_name,
+            "elapsed_seconds": round(elapsed, 1),
+            "total_retried": total_retried,
+            "total_corrected": total_corrected,
+            "avg_retries": round(avg_retries, 4),
+        }
+
+        logger.info("=== [%s] Final Metrics (%.1fs) ===", mode_name, elapsed)
+        logger.info("Execution Accuracy : %.4f", metrics["execution_accuracy"])
+        logger.info("Exact Match        : %.4f", metrics["exact_match"])
+        logger.info("Schema Recall      : %.4f", metrics["schema_recall"])
+        logger.info("Schema Precision   : %.4f", metrics["schema_precision"])
+        logger.info("Total Examples     : %d", metrics["total_examples"])
+
+    _save_final(run_dir, results, final_metrics)
+    logger.info("=== [%s] Results saved to: %s ===", mode_name, run_dir)
+
+    return final_metrics
+
+
+def _benchmark_all(
+    config_path: str,
+    overrides: list[str] | None = None,
+    modes: list[str] | None = None,
+    batch_enabled: bool = True,
+    batch_size: int = 32,
+    concurrency: int = 20,
+):
+    """Run the pipeline across multiple retriever modes and compare results.
+
+    Shared one-time setup (data loading, ChromaDB indexing, model loading),
+    then loops over modes.
+    """
     cfg = load_config(config_path)
     if overrides:
         cfg = apply_overrides(cfg, overrides)
+
+    modes = modes or ["hybrid", "graph", "merge"]
+
+    # ---- Shared one-time setup ----
+    logger.info("=== Benchmark Setup: Loading data + indexing ===")
+    adapter_name = cfg["data"].get("adapter", "spider_v1")
+    parser = get_parser(adapter_name)
+    databases, examples = parser.load(cfg["data"]["dataset_path"])
+    logger.info("Loaded %d databases, %d examples", len(databases), len(examples))
+
+    # Chunk schemas
+    chunker = SchemaChunker(max_sample_values=cfg["chunking"].get("max_sample_values", 5))
+    all_chunks = chunker.chunk_many(databases)
+    logger.info("Generated %d schema chunks", len(all_chunks))
+
+    # Index into ChromaDB
+    idx_cfg = cfg["indexing"]
+    embedding_encoder = _build_embedding_encoder(idx_cfg)
+    indexer = SchemaIndexer(
+        embedding_model=idx_cfg["embedding_model"],
+        persist_dir=idx_cfg["chroma_persist_dir"],
+        collection_name=idx_cfg["collection_name"],
+        batch_size=idx_cfg["batch_size"],
+        encoder=embedding_encoder,
+    )
+
+    fingerprint = _compute_index_fingerprint(cfg, len(all_chunks))
+    reindex = cfg.get("_reindex", False)
+    if not reindex and _check_index_cache(idx_cfg["chroma_persist_dir"], fingerprint):
+        logger.info("Index cache hit — skipping re-indexing.")
+    else:
+        indexer.index(all_chunks, reset=True)
+        _save_index_fingerprint(idx_cfg["chroma_persist_dir"], fingerprint, len(all_chunks))
+
+    # Optional NPMI scorer
+    npmi_scorer = None
+    npmi_cfg = cfg.get("npmi", {})
+    if npmi_cfg.get("enable") and npmi_cfg.get("matrix_path"):
+        npmi_scorer = NPMIScorer.load(npmi_cfg["matrix_path"])
+
+    # ---- Run each mode ----
+    all_metrics = {}
+    for mode_name in modes:
+        if mode_name not in _MODE_OVERRIDES:
+            logger.warning("Unknown mode '%s' — skipping. Valid: %s",
+                          mode_name, list(_MODE_OVERRIDES.keys()))
+            continue
+
+        metrics = _run_single_mode(
+            cfg, mode_name,
+            databases=databases,
+            examples=examples,
+            all_chunks=all_chunks,
+            indexer=indexer,
+            npmi_scorer=npmi_scorer,
+            batch_enabled=batch_enabled,
+            batch_size=batch_size,
+            concurrency=concurrency,
+        )
+        all_metrics[mode_name] = metrics
+
+    # ---- Print comparison table ----
+    if all_metrics:
+        logger.info("")
+        logger.info("=" * 72)
+        logger.info("BENCHMARK COMPARISON")
+        logger.info("=" * 72)
+        logger.info(
+            "%-10s  %8s  %8s  %8s  %8s  %8s",
+            "Mode", "EX", "EM", "Recall", "Prec.", "Time(s)",
+        )
+        logger.info("-" * 72)
+        for mode_name, m in all_metrics.items():
+            if m:
+                logger.info(
+                    "%-10s  %8.4f  %8.4f  %8.4f  %8.4f  %8.1f",
+                    mode_name,
+                    m.get("execution_accuracy", 0),
+                    m.get("exact_match", 0),
+                    m.get("schema_recall", 0),
+                    m.get("schema_precision", 0),
+                    m.get("elapsed_seconds", 0),
+                )
+        logger.info("=" * 72)
+
+    return all_metrics
+
+
+# =============================================================================
+# Main pipeline
+# =============================================================================
+
+def main(config_path: str, overrides: list[str] | None = None,
+         batch_enabled: bool = False, batch_size: int = 32, concurrency: int = 20):
+    cfg = load_config(config_path)
+    if overrides:
+        cfg = apply_overrides(cfg, overrides)
+
+    # Read batch config from YAML (CLI args override)
+    batch_cfg = cfg.get("batch", {})
+    if not batch_enabled:
+        batch_enabled = batch_cfg.get("enabled", False)
+    if batch_size == 32:  # default — check config
+        batch_size = batch_cfg.get("batch_size", 32)
+    if concurrency == 20:  # default — check config
+        concurrency = batch_cfg.get("concurrency", 20)
 
     # ---- Load feature-flag configs ----
     pre_cfg = cfg.get("pre_retrieval", {})
@@ -608,152 +1343,146 @@ def main(config_path: str, overrides: list[str] | None = None):
     logger.info("Running pipeline on %d examples (%d remaining)...",
                 len(dev_examples), len(dev_examples) - len(results))
 
-    for i, ex in enumerate(dev_examples):
-        db = db_map.get(ex.db_id)
-        if db is None:
-            continue
-
-        # Skip already-completed examples (resume)
-        ex_key = f"{ex.db_id}||{ex.question}"
-        if ex_key in completed_keys:
-            continue
-
-        # === Evidence injection (BIRD "evidence" field) ===
-        question = ex.question
-        if getattr(ex, "evidence", "") and ex.evidence.strip():
-            question = f"{ex.question}\nHint: {ex.evidence.strip()}"
-
-        # === PHASE 1: Pre-Retrieval ===
-        value_hints: str = ""
-        value_matches_list = None       # v3: for GraphRetriever seed boosting
-        if value_scanner is not None:
-            try:
-                matches = value_scanner.scan(question, db)
-                value_hints = value_scanner.to_schema_hints(matches)
-                value_matches_list = matches  # v3: pass to retriever
-            except Exception as e:
-                logger.debug("ValueScanner error on example %d: %s", i, e)
-
-        aug_result = augmentor.augment(
-            question,
-            db,
-            value_scanner=value_scanner if aug_strategy == "value" else None,
-            decomposer=decomposer if aug_strategy == "decompose" else None,
+    if batch_enabled and inference is not None:
+        logger.info("Async batch mode enabled (batch_size=%d, concurrency=%d)",
+                    batch_size, concurrency)
+        _run_async_pipeline_loop(
+            dev_examples=dev_examples,
+            db_map=db_map,
+            results=results,
+            completed_keys=completed_keys,
+            run_dir=run_dir,
+            value_scanner=value_scanner,
+            augmentor=augmentor,
+            aug_strategy=aug_strategy,
+            decomposer=decomposer,
+            retriever=retriever,
+            linker=linker,
+            all_chunks=all_chunks,
+            schema_filter=schema_filter,
+            inference=inference,
+            gen_mode=gen_mode,
+            n_candidates=n_candidates,
+            retry_loop=retry_loop,
+            candidate_selector=candidate_selector,
+            batch_size=batch_size,
+            concurrency=concurrency,
         )
+    else:
+        for i, ex in enumerate(dev_examples):
+            db = db_map.get(ex.db_id)
+            if db is None:
+                continue
 
-        # === PHASE 2: Retrieval ===
-        # v3: Pass value_matches to GraphRetriever for seed boosting.
-        # HybridRetriever ignores unknown kwargs via its own signature,
-        # so we use hasattr to detect GraphRetriever's value_matches support.
-        retriever_kwargs = {"db_id": ex.db_id}
-        if value_matches_list and hasattr(retriever, 'graph'):
-            retriever_kwargs["value_matches"] = value_matches_list
+            # Skip already-completed examples (resume)
+            ex_key = f"{ex.db_id}||{ex.question}"
+            if ex_key in completed_keys:
+                continue
 
-        if isinstance(aug_result, list):
-            # Multi-query (decompose strategy)
-            expanded = linker.expand(
-                retriever.retrieve_multi(aug_result, **retriever_kwargs),
-                db,
-                [c for c in all_chunks if c.db_id == ex.db_id],
+            # === Evidence injection (BIRD "evidence" field) ===
+            question = ex.question
+            if getattr(ex, "evidence", "") and ex.evidence.strip():
+                question = f"{ex.question}\nHint: {ex.evidence.strip()}"
+
+            p12 = _process_phases_1_2(
+                question, ex, db,
+                value_scanner=value_scanner,
+                augmentor=augmentor,
+                aug_strategy=aug_strategy,
+                decomposer=decomposer,
+                retriever=retriever,
+                linker=linker,
+                all_chunks=all_chunks,
+                schema_filter=schema_filter,
+                idx=i,
             )
-        else:
-            raw_results = retriever.retrieve(aug_result, **retriever_kwargs)
-            db_chunks = [c for c in all_chunks if c.db_id == ex.db_id]
-            expanded = linker.expand(raw_results, db, db_chunks)
 
-        schema_context = schema_filter.filter_and_format(
-            expanded, db, value_hints=value_hints if value_hints else None
-        )
+            # === PHASE 3: Generation ===
+            gen_result: dict | None = None
+            if inference is not None:
+                try:
+                    raw_gen = inference.generate(
+                        p12["question"],
+                        p12["schema_context"],
+                        mode=gen_mode,
+                        n_candidates=n_candidates,
+                    )
 
-        # Track retrieved tables for schema metrics
-        retrieved_tables = schema_filter.get_retrieved_tables(expanded)
+                    # Phase 4a: CandidateSelector (if n_candidates > 1)
+                    if isinstance(raw_gen, list) and candidate_selector is not None:
+                        gen_result = candidate_selector.select(raw_gen, ex.db_id)
+                    elif isinstance(raw_gen, list):
+                        gen_result = raw_gen[0] if raw_gen else {}
+                    else:
+                        gen_result = raw_gen
 
-        # === PHASE 3: Generation ===
-        gen_result: dict | None = None
-        if inference is not None:
-            try:
-                raw_gen = inference.generate(
-                    question,
-                    schema_context,
-                    mode=gen_mode,
-                    n_candidates=n_candidates,
+                except Exception as e:
+                    logger.warning("Inference error on example %d: %s", i, e)
+                    gen_result = {"sql": "", "reasoning": "", "raw_output": ""}
+
+            # === PHASE 4b: Retry Loop ===
+            retry_count = 0
+            correction_applied = False
+
+            if gen_result is not None and retry_loop is not None:
+                try:
+                    gen_result = retry_loop.run(
+                        question=p12["question"],
+                        schema_context=p12["schema_context"],
+                        initial_result=gen_result,
+                        db_id=ex.db_id,
+                        gold_sql=ex.query,
+                    )
+                    retry_count = gen_result.get("retry_count", 0)
+                    correction_applied = gen_result.get("correction_applied", False)
+                except Exception as e:
+                    logger.warning("RetryLoop error on example %d: %s", i, e)
+
+            # === Evaluation ===
+            predicted_sql = gen_result.get("sql", "") if gen_result else ""
+            gold_sql = ex.query
+
+            db_path = db.db_path or ""
+            ex_result: bool = False
+            em_result: bool = False
+
+            if predicted_sql and db_path:
+                ex_result = execution_accuracy(predicted_sql, gold_sql, db_path)
+                em_result = exact_match(predicted_sql, gold_sql)
+            elif predicted_sql:
+                em_result = exact_match(predicted_sql, gold_sql)
+
+            recall = schema_recall(p12["retrieved_tables"], gold_sql)
+            precision = schema_precision(p12["retrieved_tables"], gold_sql)
+
+            result_entry = {
+                "db_id": ex.db_id,
+                "question": p12["question"],
+                "evidence": getattr(ex, "evidence", ""),
+                "schema_context": p12["schema_context"],
+                "gold_sql": gold_sql,
+                "predicted_sql": predicted_sql,
+                "raw_output": gen_result.get("raw_output", "") if gen_result else "",
+                "ex": ex_result,
+                "em": em_result,
+                "recall": recall,
+                "precision": precision,
+                "retry_count": retry_count,
+                "correction_applied": correction_applied,
+            }
+            results.append(result_entry)
+            _append_result(run_dir, result_entry)
+
+            if (i + 1) % 100 == 0:
+                partial = compute_metrics(results)
+                logger.info(
+                    "Progress %d/%d — EX=%.3f EM=%.3f recall=%.3f precision=%.3f",
+                    i + 1, len(dev_examples),
+                    partial["execution_accuracy"],
+                    partial["exact_match"],
+                    partial["schema_recall"],
+                    partial["schema_precision"],
                 )
-
-                # Phase 4a: CandidateSelector (if n_candidates > 1)
-                if isinstance(raw_gen, list) and candidate_selector is not None:
-                    gen_result = candidate_selector.select(raw_gen, ex.db_id)
-                elif isinstance(raw_gen, list):
-                    gen_result = raw_gen[0] if raw_gen else {}
-                else:
-                    gen_result = raw_gen
-
-            except Exception as e:
-                logger.warning("Inference error on example %d: %s", i, e)
-                gen_result = {"sql": "", "reasoning": "", "raw_output": ""}
-
-        # === PHASE 4b: Retry Loop ===
-        retry_count = 0
-        correction_applied = False
-
-        if gen_result is not None and retry_loop is not None:
-            try:
-                gen_result = retry_loop.run(
-                    question=question,
-                    schema_context=schema_context,
-                    initial_result=gen_result,
-                    db_id=ex.db_id,
-                    gold_sql=ex.query,
-                )
-                retry_count = gen_result.get("retry_count", 0)
-                correction_applied = gen_result.get("correction_applied", False)
-            except Exception as e:
-                logger.warning("RetryLoop error on example %d: %s", i, e)
-
-        # === Evaluation ===
-        predicted_sql = gen_result.get("sql", "") if gen_result else ""
-        gold_sql = ex.query
-
-        db_path = db.db_path or ""
-        ex_result: bool = False
-        em_result: bool = False
-
-        if predicted_sql and db_path:
-            ex_result = execution_accuracy(predicted_sql, gold_sql, db_path)
-            em_result = exact_match(predicted_sql, gold_sql)
-        elif predicted_sql:
-            em_result = exact_match(predicted_sql, gold_sql)
-
-        recall = schema_recall(retrieved_tables, gold_sql)
-        precision = schema_precision(retrieved_tables, gold_sql)
-
-        result_entry = {
-            "db_id": ex.db_id,
-            "question": question,  # includes evidence hint if present
-            "evidence": getattr(ex, "evidence", ""),
-            "schema_context": schema_context,
-            "gold_sql": gold_sql,
-            "predicted_sql": predicted_sql,
-            "raw_output": gen_result.get("raw_output", "") if gen_result else "",
-            "ex": ex_result,
-            "em": em_result,
-            "recall": recall,
-            "precision": precision,
-            "retry_count": retry_count,
-            "correction_applied": correction_applied,
-        }
-        results.append(result_entry)
-        _append_result(run_dir, result_entry)
-
-        if (i + 1) % 100 == 0:
-            partial = compute_metrics(results)
-            logger.info(
-                "Progress %d/%d — EX=%.3f EM=%.3f recall=%.3f precision=%.3f",
-                i + 1, len(dev_examples),
-                partial["execution_accuracy"],
-                partial["exact_match"],
-                partial["schema_recall"],
-                partial["schema_precision"],
-            )
 
     # ---- Aggregate Results ----
     final_metrics = None
@@ -817,10 +1546,57 @@ if __name__ == "__main__":
         default=0,
         help="Limit number of examples to process (0 = all).",
     )
+    # Batch / async inference flags
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Enable async/batch LLM inference for faster pipeline execution.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Number of examples per micro-batch (default: 32).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=20,
+        help="Max parallel API calls for async inference (default: 20).",
+    )
+    # Multi-mode benchmark flags
+    parser.add_argument(
+        "--benchmark_all",
+        action="store_true",
+        help="Run all retriever modes (hybrid, graph, merge) and compare results.",
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="*",
+        default=["hybrid", "graph", "merge"],
+        help="Retriever modes to benchmark (default: hybrid graph merge).",
+    )
     args = parser.parse_args()
     overrides = args.override or []
     if args.reindex:
         overrides.append("_reindex=true")
     if args.max_examples:
         overrides.append(f"_max_examples={args.max_examples}")
-    main(args.config, overrides=overrides)
+
+    if args.benchmark_all:
+        _benchmark_all(
+            args.config,
+            overrides=overrides,
+            modes=args.modes,
+            batch_enabled=args.batch,
+            batch_size=args.batch_size,
+            concurrency=args.concurrency,
+        )
+    else:
+        main(
+            args.config,
+            overrides=overrides,
+            batch_enabled=args.batch,
+            batch_size=args.batch_size,
+            concurrency=args.concurrency,
+        )
