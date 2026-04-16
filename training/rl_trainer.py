@@ -20,7 +20,9 @@ Docs:
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sqlite3
 from pathlib import Path
 
 from .config import RLConfig
@@ -72,7 +74,11 @@ def match_sql_format_exactly(completions, **kwargs):
 
 
 def match_sql_format_approximately(completions, **kwargs):
-    """Partial credit for each format element present."""
+    """Partial credit for each format element present.
+
+    Also penalizes trivially short <think> blocks to prevent thinking collapse
+    (HES-SQL finding: GRPO can degrade thinking capability without this guard).
+    """
     scores = []
     for completion in completions:
         score = 0.0
@@ -96,6 +102,13 @@ def match_sql_format_approximately(completions, **kwargs):
             score += 0.5
         elif closing_count > 1:
             score -= 0.5
+
+        # Penalize trivially short thinking (thinking collapse prevention)
+        think_match = THINK_BLOCK_RE.search(response)
+        if think_match:
+            think_len = len(think_match.group(1).strip().split())
+            if think_len < 5:
+                score -= 0.5  # near-empty thinking block
 
         scores.append(score)
     return scores
@@ -142,6 +155,67 @@ def check_sql_execution(completions, answer, **kwargs):
     return scores
 
 
+def check_sql_execution_real(completions, answer, db_path=None, **kwargs):
+    """Check SQL execution accuracy against real SQLite database.
+
+    Replaces string-matching with actual DB execution when db_path is available.
+    Falls back to check_sql_execution() if no db_path provided.
+
+    Scores: 5.0 exact result match, overlap*3.0 partial, -2.0 no SQL found.
+    """
+    if db_path is None:
+        return check_sql_execution(completions, answer, **kwargs)
+
+    scores = []
+    for completion, gold, dbp in zip(completions, answer, db_path):
+        response = completion[0]["content"]
+
+        match = FULL_FORMAT_RE.search(response)
+        if match is None:
+            match = SQL_BLOCK_RE.search(response)
+        if match is None:
+            scores.append(-2.0)
+            continue
+
+        predicted = match.group(1).strip()
+        gold_stripped = gold.strip()
+
+        if not dbp or not Path(dbp).exists():
+            # DB not accessible, fall back to string comparison
+            if predicted == gold_stripped:
+                scores.append(5.0)
+            elif predicted.lower() == gold_stripped.lower():
+                scores.append(3.5)
+            else:
+                gold_tokens = set(gold_stripped.lower().split())
+                pred_tokens = set(predicted.lower().split())
+                overlap = len(gold_tokens & pred_tokens) / max(len(gold_tokens), 1)
+                scores.append(overlap * 3.0 if overlap > 0.3 else -1.0)
+            continue
+
+        try:
+            conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=5)
+            conn.execute("PRAGMA query_only = true")
+            cursor = conn.cursor()
+            cursor.execute(gold_stripped)
+            gold_results = set(map(tuple, cursor.fetchall()))
+            cursor.execute(predicted)
+            pred_results = set(map(tuple, cursor.fetchall()))
+            conn.close()
+
+            if gold_results == pred_results:
+                scores.append(5.0)
+            elif pred_results and gold_results:
+                overlap = len(gold_results & pred_results) / max(len(gold_results), 1)
+                scores.append(overlap * 3.0)
+            else:
+                scores.append(0.0)
+        except Exception:
+            scores.append(-1.0)
+
+    return scores
+
+
 def check_schema_faithfulness(completions, schema_tables=None, **kwargs):
     """Check if SQL references only tables/columns from the given schema.
 
@@ -178,6 +252,162 @@ def check_schema_faithfulness(completions, schema_tables=None, **kwargs):
     return scores
 
 
+def check_column_set_matching(completions, answer, **kwargs):
+    """Dense structural reward: partial credit for correct tables/columns even if full SQL wrong.
+
+    Inspired by SQL-ASTRA's Column-Set Matching Reward (CSMR).
+    Converts binary EX feedback into [0, 2.0] signal based on structural overlap.
+    Critical for small models that need dense gradients (Think2SQL finding).
+
+    Scores: [0, 1.0] for table overlap + [0, 1.0] for column/identifier overlap = max 2.0.
+    """
+    scores = []
+    for completion, gold in zip(completions, answer):
+        response = completion[0]["content"]
+
+        match = FULL_FORMAT_RE.search(response)
+        if match is None:
+            match = SQL_BLOCK_RE.search(response)
+        if match is None:
+            scores.append(0.0)
+            continue
+
+        predicted = match.group(1).strip().lower()
+        gold_lower = gold.strip().lower()
+
+        # Table overlap: extract tables after FROM and JOIN
+        pred_tables = set(re.findall(r'\b(?:from|join)\s+(\w+)', predicted))
+        gold_tables = set(re.findall(r'\b(?:from|join)\s+(\w+)', gold_lower))
+
+        if gold_tables:
+            table_jaccard = len(pred_tables & gold_tables) / max(len(pred_tables | gold_tables), 1)
+        else:
+            table_jaccard = 1.0  # no tables expected, neutral
+
+        # Identifier overlap: all word tokens excluding SQL keywords
+        _SQL_KEYWORDS = frozenset({
+            "select", "from", "where", "and", "or", "join", "on", "left", "right",
+            "inner", "outer", "group", "by", "order", "asc", "desc", "having",
+            "limit", "distinct", "as", "in", "not", "null", "is", "like",
+            "between", "case", "when", "then", "else", "end", "count", "sum",
+            "avg", "max", "min", "cast", "union", "all", "exists", "with",
+            "insert", "update", "delete", "into", "values", "set", "create",
+            "table", "drop", "alter", "true", "false", "offset", "except",
+            "intersect", "cross", "full", "natural",
+        })
+        pred_ids = set(re.findall(r'\b[a-z_]\w*\b', predicted)) - _SQL_KEYWORDS
+        gold_ids = set(re.findall(r'\b[a-z_]\w*\b', gold_lower)) - _SQL_KEYWORDS
+
+        if gold_ids:
+            id_jaccard = len(pred_ids & gold_ids) / max(len(pred_ids | gold_ids), 1)
+        else:
+            id_jaccard = 1.0
+
+        scores.append(table_jaccard * 1.0 + id_jaccard * 1.0)
+
+    return scores
+
+
+def check_error_correction_success(completions, answer, db_path=None, task_type=None, schema_tables=None, **kwargs):
+    """Bonus reward specifically for error_correction task type.
+
+    Returns 0.0 for standard text2sql tasks (neutral, no interference).
+    For error_correction tasks, rewards:
+      - Execution match against gold (+4.0)
+      - SQL executes without error (+1.0)
+      - Dense semantic reasoning quality:
+          - Diagnosis signal: mentions error/wrong/incorrect/missing (+0.5)
+          - Fix signal: mentions fix/correct/change/replace/use (+0.5)
+          - Schema grounding: mentions actual table names from schema (+0.5)
+          - Length bonus (+0.3 for >100 words, +0.1 for >30 words)
+    Max: 1.0 + 4.0 + 0.5 + 0.5 + 0.5 + 0.3 = 6.8
+    """
+    if task_type is None:
+        return [0.0] * len(completions)
+
+    scores = []
+    for i, (completion, gold, tt) in enumerate(zip(completions, answer, task_type)):
+        if tt != "error_correction":
+            scores.append(0.0)
+            continue
+
+        response = completion[0]["content"]
+
+        match = FULL_FORMAT_RE.search(response)
+        if match is None:
+            match = SQL_BLOCK_RE.search(response)
+        if match is None:
+            scores.append(-2.0)
+            continue
+
+        predicted = match.group(1).strip()
+        gold_stripped = gold.strip()
+        score = 0.0
+
+        # ── Execution correctness ────────────────────────────────────────
+        dbp = db_path[i] if isinstance(db_path, (list, tuple)) else db_path
+        if dbp and Path(dbp).exists():
+            try:
+                conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=5)
+                conn.execute("PRAGMA query_only = true")
+                cursor = conn.cursor()
+
+                # Does it execute at all?
+                cursor.execute(predicted)
+                cursor.fetchall()
+                score += 1.0  # valid SQL that executes
+
+                # Does it match gold?
+                cursor.execute(gold_stripped)
+                gold_results = set(map(tuple, cursor.fetchall()))
+                cursor.execute(predicted)
+                pred_results = set(map(tuple, cursor.fetchall()))
+                conn.close()
+
+                if gold_results == pred_results:
+                    score += 4.0
+            except Exception:
+                # SQL failed to execute — no execution bonus
+                pass
+        else:
+            # Fallback: string comparison
+            if predicted.lower() == gold_stripped.lower():
+                score += 5.0
+
+        # ── Semantic reasoning quality ───────────────────────────────────
+        think_match = THINK_BLOCK_RE.search(response)
+        if think_match:
+            think_text = think_match.group(1).strip().lower()
+            reasoning_len = len(think_text.split())
+
+            # Diagnosis signal — does the reasoning identify the error?
+            has_diagnosis = any(kw in think_text for kw in [
+                "error", "wrong", "incorrect", "missing", "instead of",
+                "should be", "not exist", "no such", "ambiguous",
+            ])
+            # Fix signal — does the reasoning propose a correction?
+            has_fix = any(kw in think_text for kw in [
+                "fix", "correct", "change", "replace", "use",
+                "add", "remove", "join", "where",
+            ])
+            # Schema grounding — does reasoning reference actual tables?
+            tables_str = ""
+            if schema_tables is not None:
+                tables_str = schema_tables[i] if isinstance(schema_tables, (list, tuple)) else schema_tables
+            table_names = [t.strip().lower() for t in tables_str.split(",") if t.strip()]
+            has_grounding = any(t in think_text for t in table_names) if table_names else False
+
+            score += 0.5 if has_diagnosis else 0.0
+            score += 0.5 if has_fix else 0.0
+            score += 0.5 if has_grounding else 0.0
+            # Length bonus (tiebreaker)
+            score += 0.3 if reasoning_len > 100 else (0.1 if reasoning_len > 30 else 0.0)
+
+        scores.append(score)
+
+    return scores
+
+
 # ──────────────────────────────────────────────────────────────
 # GRPO Trainer
 # ──────────────────────────────────────────────────────────────
@@ -199,7 +429,14 @@ class GRPOTrainerUnsloth:
 
     def setup(self):
         """Load SFT checkpoint via Unsloth and attach LoRA for RL stage."""
+        import torch
         from unsloth import FastLanguageModel
+
+        # Ensure each torchrun worker sticks to its local GPU before loading weights.
+        if torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
+            logger.info("Using CUDA device local_rank=%d", local_rank)
 
         logger.info("Loading SFT model via Unsloth: %s", self.config.sft_model_path)
 
@@ -208,6 +445,7 @@ class GRPOTrainerUnsloth:
             max_seq_length=self.config.max_seq_length,
             dtype=None,
             load_in_4bit=self.config.load_in_4bit,
+            device_map=None,  # required for torchrun/DDP
         )
 
         # Attach LoRA for RL fine-tuning
@@ -270,12 +508,16 @@ class GRPOTrainerUnsloth:
             report_to="none",
         )
 
-        # Multi-signal reward functions (each called independently by GRPO)
+        # Multi-signal reward functions.
+        # trl.GRPOTrainer auto-forwards extra dataset columns (db_path, task_type,
+        # schema_tables) as **kwargs to each reward function.
         reward_funcs = [
-            match_sql_format_exactly,
-            match_sql_format_approximately,
-            check_sql_execution,
-            check_schema_faithfulness,
+            match_sql_format_exactly,        # max 3.0  — format correctness
+            match_sql_format_approximately,  # max 1.5  — partial format + collapse guard
+            check_sql_execution_real,        # max 5.0  — real DB execution accuracy
+            check_column_set_matching,       # max 2.0  — dense structural signal (SQL-ASTRA)
+            check_schema_faithfulness,       # max 2.0  — schema compliance
+            check_error_correction_success,  # max 6.8  — error correction bonus
         ]
 
         trainer = GRPOTrainer(
@@ -339,7 +581,13 @@ class DPOTrainerUnsloth:
 
     def setup(self):
         """Load SFT checkpoint with Unsloth."""
+        import torch
         from unsloth import FastLanguageModel, PatchDPOTrainer
+
+        if torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
+            logger.info("Using CUDA device local_rank=%d", local_rank)
 
         # Patch DPOTrainer for Unsloth compatibility
         PatchDPOTrainer()
@@ -351,6 +599,7 @@ class DPOTrainerUnsloth:
             max_seq_length=self.config.max_seq_length,
             dtype=None,
             load_in_4bit=self.config.load_in_4bit,
+            device_map=None,  # required for torchrun/DDP
         )
 
         lora = self.config.lora

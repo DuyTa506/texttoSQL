@@ -3,7 +3,7 @@ Launch script for SFT Training (Stage 1).
 
 Usage:
     python scripts/train_sft.py
-    python scripts/train_sft.py --base_model ./models/Qwen3-4B
+    python scripts/train_sft.py --base_model ./models/Qwen3.5-2B
     python scripts/train_sft.py --load_in_4bit  # enable QLoRA
 """
 
@@ -30,9 +30,9 @@ def main():
     parser = argparse.ArgumentParser(description="SFT Training (Stage 1)")
 
     # Model
-    parser.add_argument("--base_model", default="./models/Qwen3-4B",
+    parser.add_argument("--base_model", default="./models/Qwen3.5-2B",
                         help="Model name or local path")
-    parser.add_argument("--max_seq_length", type=int, default=4096)
+    parser.add_argument("--max_seq_length", type=int, default=8192)
     parser.add_argument("--load_in_4bit", action="store_true", default=False,
                         help="Use QLoRA (4-bit quantization)")
 

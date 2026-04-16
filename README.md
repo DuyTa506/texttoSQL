@@ -53,7 +53,10 @@ Navigate to the project directory and install the required dependencies:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,train]"
-pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+# Keep unsloth + unsloth_zoo in sync for Qwen3.5 support
+pip install --upgrade --force-reinstall --no-cache-dir unsloth unsloth_zoo
+# Keep transformers compatible with current unsloth release
+pip install --upgrade --force-reinstall "transformers==5.5.0"
 pip install torchvision ijson
 ```
 
@@ -73,12 +76,12 @@ pip install torchvision ijson
 > ```
 > Or reinstall both packages from the same source once official multi-GPU support is released.
 
-### Download Base Model
+### Download Base Model (Qwen3.5-2B)
 
 ```bash
 python -c "
 from huggingface_hub import snapshot_download
-snapshot_download('Qwen/Qwen3-4B', local_dir='./models/Qwen3-4B')
+snapshot_download('Qwen/Qwen3.5-2B', local_dir='./models/Qwen3.5-2B')
 "
 ```
 
@@ -104,25 +107,24 @@ python scripts/build_npmi_matrix.py \
 
 ### Training (DDP Multi-GPU)
 
-Stage 1 — SFT with QLoRA on all available GPUs:
+Stage 1 — SFT with LoRA on all available GPUs:
 ```bash
 # 4-GPU DDP training (adjust --nproc_per_node to your GPU count)
 torchrun --nproc_per_node=4 scripts/train_sft.py \
-    --base_model ./models/Qwen3-4B \
+    --base_model ./models/Qwen3.5-2B \
     --data_source omnisql \
     --omnisql_data_paths data/sft/train.jsonl data/sft/dev.jsonl \
     --batch_size 2 \
     --gradient_accumulation_steps 4 \
     --num_epochs 3 \
-    --load_in_4bit \
     --output_dir ./checkpoints/sft
 ```
 
 > **Note:** With DDP, effective batch size = `batch_size × grad_accum × num_GPUs`.
 > Example: 2 × 4 × 4 = **32**.
 >
-> Use `--load_in_4bit` (QLoRA) for GPUs with ≤16GB VRAM.
-> Without it, each GPU needs ~8GB just for the FP16 model weights.
+> For Qwen3.5, Unsloth recommends bf16/16-bit LoRA (do **not** use `--load_in_4bit` unless you accept quality tradeoffs).
+> If you only do text-to-SQL (no image/video), current code path with `FastLanguageModel` is sufficient.
 
 Stage 2 — GRPO reinforcement learning (after SFT):
 ```bash
@@ -154,7 +156,7 @@ python scripts/run_pipeline.py --dataset spider --mode run
 - **Embeddings**: `paraphrase-multilingual-mpnet-base-v2`
 - **Vector DB**: ChromaDB
 - **Retrieval**: BM25 + Semantic + NPMI (RRF fusion)
-- **SLM**: Qwen3-4B
+- **SLM**: Qwen3.5-2B
 - **RL**: GRPO (primary) / DPO (ablation)
 - **Data**: `ijson` for streaming large JSON files
 

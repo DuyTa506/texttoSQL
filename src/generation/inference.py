@@ -93,6 +93,47 @@ class SQLInference:
             "raw_output": raw_output,
         }
 
+    def generate_n(
+        self,
+        question: str,
+        schema_context: str,
+        n: int = 5,
+        temperature: float = 0.7,
+    ) -> list[dict]:
+        """Generate N diverse SQL candidates for the same question.
+
+        Uses temperature sampling to produce diverse outputs.
+        Returns list of dicts, each with keys: sql, reasoning, raw_output.
+        """
+        import torch
+
+        prompt = self._build_prompt(question, schema_context)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        gen_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": True,
+            "temperature": max(temperature, 1e-7),
+            "top_p": 0.95,
+            "pad_token_id": self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            "num_return_sequences": n,
+        }
+
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, **gen_kwargs)
+
+        input_len = inputs["input_ids"].shape[1]
+        results = []
+        for seq in output_ids:
+            new_tokens = seq[input_len:]
+            raw_output = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            results.append({
+                "sql": self._extract_sql(raw_output),
+                "reasoning": self._extract_reasoning(raw_output),
+                "raw_output": raw_output,
+            })
+        return results
+
     def generate_batch(
         self,
         questions: list[str],
@@ -118,22 +159,47 @@ class SQLInference:
 
     @staticmethod
     def _extract_sql(text: str) -> str:
-        """Extract SQL from model output."""
-        # Try explicit "SQL:" marker
+        """Extract SQL from model output (Qwen3 format or legacy).
+
+        Priority order:
+          1. Full Qwen3 format: </think> ... ```sql ... ```
+          2. Bare ```sql ... ``` block
+          3. Explicit "SQL:" prefix
+          4. Raw SELECT statement
+          5. Last non-empty line
+        """
+        # 1. Full Qwen3 format
+        full_match = re.search(
+            r"</think>.*?```sql\s*(.+?)\s*```",
+            text,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        if full_match:
+            return full_match.group(1).strip()
+
+        # 2. Bare ```sql block
+        sql_block_match = re.search(
+            r"```sql\s*(.+?)\s*```",
+            text,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        if sql_block_match:
+            return sql_block_match.group(1).strip()
+
+        # 3. Explicit "SQL:" prefix (legacy format)
         for line in reversed(text.strip().split("\n")):
             stripped = line.strip()
             if stripped.upper().startswith("SQL:"):
                 return stripped[4:].strip()
 
-        # Try to find SELECT statement
+        # 4. Raw SELECT statement
         match = re.search(r'(SELECT\s+.+)', text, re.IGNORECASE | re.DOTALL)
         if match:
             sql = match.group(1).strip()
-            # Remove trailing explanation
             sql = re.split(r'\n\n|\n(?=[A-Z])', sql)[0]
             return sql.strip()
 
-        # Fallback: last non-empty line
+        # 5. Fallback: last non-empty line
         lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
         return lines[-1] if lines else ""
 

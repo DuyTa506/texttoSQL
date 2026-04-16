@@ -1,5 +1,4 @@
 """
-SFT Trainer (Unsloth + Qwen3) – Stage 1 of the 2-stage SLM training pipeline.
 
 Qwen3-4B has built-in thinking mode (<think>...</think>).
 SFT teaches domain knowledge (Text-to-SQL), NOT reasoning format.
@@ -11,12 +10,12 @@ API Reference:
   - SFTTrainer (from trl)                → training loop
   - tokenizer.apply_chat_template(enable_thinking=True/False)
 
-Docs: https://unsloth.ai/docs/models/qwen3-how-to-run-and-fine-tune
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from .config import SFTConfig
@@ -40,7 +39,15 @@ class SFTTrainerUnsloth:
 
     def setup(self):
         """Load model with Unsloth and attach LoRA adapters."""
+        import torch
         from unsloth import FastLanguageModel
+
+        # Under torchrun, bind each process to its own GPU before model load.
+        # Otherwise multiple ranks may allocate on cuda:0 and OOM during setup.
+        if torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
+            logger.info("Using CUDA device local_rank=%d", local_rank)
 
         logger.info("Loading Qwen3 model via Unsloth: %s", self.config.base_model)
         logger.info("Thinking mode: %s", self.config.enable_thinking)
@@ -52,6 +59,7 @@ class SFTTrainerUnsloth:
             max_seq_length=self.config.max_seq_length,
             dtype=None,  # auto-detect (float16 / bfloat16)
             load_in_4bit=self.config.load_in_4bit,
+            device_map=None,  # required for torchrun/DDP (avoid device_map='auto')
         )
 
         # Step 2: Attach LoRA adapters
